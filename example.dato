@@ -1,0 +1,13 @@
+data:
+i32 x;
+i64 y;
+ptr z;
+
+system:
+i32 foo(i32 a, i32 b) {
+data:
+  i32 c;
+code:
+  c = a + b;
+  return c *2;
+}
