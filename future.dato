@@ -1,0 +1,17 @@
+data:
+i4 x;
+i8 y;
+ptr z;
+
+system:
+i4 foo(i4 a, i4 b)
+	data:
+  i4 c;
+	code:
+  c = a + b;
+  ret c *2;
+end
+
+code:
+x = foo(1, 2);
+print("Hello, World!\n");
