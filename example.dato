@@ -1,10 +1,11 @@
 data:
-i4 x;
-i4 y;
-i4 z;
+u1 x;
+u2 y;
+u4 z;
+u8 w;
 
 logic:
 x = 2;
 y = 3;
-z = x + y;
+z = y + x;
 ret z;

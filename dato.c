@@ -49,40 +49,42 @@ static char *token_type_str[] = {
 typedef struct ast {
 	// only support signed integers for now
 	enum {
+		AST_PROGRAM,
 		AST_VARDEF,
 		AST_TYPE,
 		AST_IDENTIFIER,
 		AST_INTEGER,
+		AST_SECTION,
 		AST_ASSIGN,
 		AST_PLUS,
 		AST_RETURN,
 		AST_VAR,
 	} type;
-	char *str;
-	int siz;
 	union {
-		struct { struct ast *l; struct ast *r; } AST_VARDEF;
-		struct { long long n; } AST_INTEGER;
-		struct { struct ast *l; struct ast *r; } AST_ASSIGN;
-		struct { struct ast *l; struct ast *r; } AST_PLUS;
-		struct { char *str; int siz; } AST_IDENTIFIER;
-		struct { char *str; int siz; } AST_TYPE;
-		struct { struct ast *r; } AST_RETURN;
-		// TODO: AST_VAR
-	} leaves;
+		struct {
+			char *str;
+			int siz;
+		};
+	} value;
+	struct ast *branches;
+	struct ast *top_branch;
+	unsigned int branches_siz;
+	unsigned int branches_cap;
 	statement_t *stat;
 	statement_t *hstat;
 } ast_t;
 
 char *ast_type_str[] = {
-	"AST_VARDEF",
-	"AST_TYPE",
-	"AST_IDENTIFIER",
-	"AST_INTEGER",
-	"AST_ASSIGN",
-	"AST_PLUS",
-	"AST_RETURN",
-	"AST_VAR",
+	"PROGRAM",
+	"VARDEF",
+	"TYPE",
+	"IDENTIFIER",
+	"INTEGER",
+	"SECTION",
+	"ASSIGN",
+	"PLUS",
+	"RETURN",
+	"VAR",
 };
 
 static char *src;
@@ -124,6 +126,10 @@ file_to_tokens(token_t *prv) {
 							 strncmp(str, "i2", 	max(siz, 2)) == 0 ||
 							 strncmp(str, "i4", 	max(siz, 2)) == 0 ||
 							 strncmp(str, "i8", 	max(siz, 2)) == 0 ||
+							 strncmp(str, "u1", 	max(siz, 2)) == 0 ||
+							 strncmp(str, "u2", 	max(siz, 2)) == 0 ||
+							 strncmp(str, "u4", 	max(siz, 2)) == 0 ||
+							 strncmp(str, "u8", 	max(siz, 2)) == 0 ||
 							 strncmp(str, "ptr", max(siz, 2)) == 0) {
 			type = TKN_TYPE;
 		} else if (strncmp(str, "ret", max(siz, 3)) == 0 ||
@@ -221,28 +227,138 @@ change_segment(token_t *tkn) {
 	}
 }
 
-ast_t *
-statements_to_ast() {
-	ast_t *ast = malloc(sizeof(ast_t)), *r, *l;
+void
+ast_new_branch(ast_t *root) {
+	if (root->branches_cap <= root->branches_siz) {
+		if (!root->branches) {
+			root->branches_cap = 1;
+			root->branches = malloc(sizeof(ast_t));
+		} else {
+			root->branches_cap *= 2;
+			root->branches = realloc(root->branches, sizeof(ast_t) * root->branches_cap);
+		}
+	}
+	root->branches[root->branches_siz].hstat = root->stat;
+	root->branches[root->branches_siz].stat = root->stat;
+	root->branches[root->branches_siz].branches = NULL;
+	root->branches[root->branches_siz].branches_siz = 0;
+	root->branches[root->branches_siz].branches_cap = 0;
+	root->top_branch = &(root->branches[root->branches_siz]);
+	root->branches_siz++;
+}
 
-	ast->stat = NULL;
-	ast->hstat = NULL;
+token_t *
+ast_handle_operator_with_type(int type, ast_t **cur_branch, token_t *tkn) {
+	token_t *operator, *left_operand, *right_operand;
+	ast_t *branch = *cur_branch;
+	// TODO: verify if the identifier is undeclared instead of assuming it's not
+	if (!tkn->nxt) {
+		branch->type = type;
+		branch->value.str = tkn->str;
+		branch->value.siz = tkn->siz;
+	} else {
+		switch (tkn->nxt->type) {
+		case TKN_OPERATOR:
+			if (!tkn->nxt->nxt) {
+				fprintf(stderr, "ERROR: unary operators are not handled yet\n"); 
+				exit(1);
+			}
+			switch(tkn->nxt->nxt->type) {
+			case TKN_INTEGER:
+			case TKN_IDENTIFIER:
+				left_operand = tkn;
+				operator = tkn->nxt;
+				right_operand = tkn->nxt->nxt;
+				if (strncmp(operator->str, "=", operator->siz) == 0) {
+					branch->type = AST_ASSIGN;
+				} else if(strncmp(operator->str, "+", operator->siz) == 0) {
+					branch->type = AST_PLUS;
+				} else {
+					fprintf(stderr, "ERROR: operator '%.*s' not handled\n", operator->siz, operator->str); 
+					exit(1);
+				}
+				ast_new_branch(branch);
+				branch->top_branch->type = type;
+				branch->top_branch->value.str = left_operand->str;
+				branch->top_branch->value.siz = left_operand->siz;
+
+				ast_new_branch(branch);
+				if (right_operand->nxt) {
+					branch->top_branch->type = AST_SECTION;
+					branch = branch->top_branch;
+					tkn = operator;
+				} else {
+					if (right_operand->type == TKN_IDENTIFIER) {
+						branch->top_branch->type = AST_IDENTIFIER;
+					} else if (right_operand->type == TKN_INTEGER) {
+						branch->top_branch->type = AST_INTEGER;
+					} else {
+						fprintf(stderr, "ERROR: operand '%.*s' not handled\n", right_operand->siz, right_operand->str); 
+						exit(1);
+					}
+					branch->top_branch->value.str = right_operand->str;
+					branch->top_branch->value.siz = right_operand->siz;
+					tkn = right_operand;
+				}
+				break;
+			default:
+				fprintf(stderr, "ERROR: '%.*s' is not a valid operand\n", tkn->siz, tkn->str); 
+				exit(1);
+				break;
+			}
+			break;
+		default:
+			fprintf(stderr, "ERROR: expected ';' before '%.*s'\n", tkn->siz, tkn->str); 
+			exit(1);
+			break;
+		}
+	}
+	*cur_branch = branch;
+	return tkn;
+}
+
+ast_t
+statements_to_ast() {
+	ast_t root;
+	root.branches = NULL;
+	root.branches_siz = 0;
+	root.branches_cap = 0;
+	root.type = AST_PROGRAM;
+
+	root.stat = NULL;
+	root.hstat = NULL;
 	int count;
 	do {
-		ast->stat = tokens_to_statements(ast->stat);
-		if (!ast->hstat && ast->stat) ast->hstat = ast->stat;
+		root.stat = tokens_to_statements(root.stat);
+		if (!root.hstat && root.stat) root.hstat = root.stat;
 		count++;
-	} while(ast->stat);
+	} while(root.stat);
 
-	
-	ast->stat = ast->hstat;
-	token_t *tkn = ast->stat->htkn;
+	root.stat = root.hstat;
+	token_t *tkn = root.stat->htkn;
+	ast_new_branch(&root);
+	ast_t *branch = root.top_branch;
 
-	while (ast->stat) {
+	// TODO: semicolon error handling
+	while (root.stat) {
 		switch(segment) {
 		case SEG_LOGIC:
 			switch(tkn->type) {
 			case TKN_SEGMENT: change_segment(tkn); break;
+			case TKN_KEYWORD:
+				branch->type = AST_RETURN;
+				if (tkn->nxt) {
+					ast_new_branch(branch);
+					branch->top_branch->type = AST_SECTION;
+					branch = branch->top_branch;
+				}
+				break;
+			case TKN_INTEGER:
+				tkn=ast_handle_operator_with_type(AST_INTEGER, &branch, tkn);
+				break;
+			case TKN_IDENTIFIER:
+				tkn=ast_handle_operator_with_type(AST_IDENTIFIER, &branch, tkn);
+				break;
 			default: 
 				fprintf(stderr, "ERROR: '%.*s' is not handled in 'logic'\n", tkn->siz, tkn->str); 
 				exit(1);
@@ -261,21 +377,23 @@ statements_to_ast() {
 					fprintf(stderr, "ERROR: %.*s is not a valid name for a variable\n", tkn->nxt->siz, tkn->nxt->str);
 					exit(1);
 				}
-				r = malloc(sizeof(ast_t));
-				l = malloc(sizeof(ast_t));
+				if (tkn->nxt->nxt) {
+					fprintf(stderr, "ERROR: expected ';' before '%.*s'\n", tkn->nxt->nxt->siz, tkn->nxt->nxt->str); 
+					exit(1);
+				}
+				branch->type = AST_VARDEF;
 
-				l->type = AST_TYPE;
-				l->leaves.AST_TYPE.str = tkn->str;
-				l->leaves.AST_TYPE.siz = tkn->siz;
+				ast_new_branch(branch);
+				branch->top_branch->type = AST_TYPE;
+				branch->top_branch->value.str = tkn->str;
+				branch->top_branch->value.siz = tkn->siz;
 
-				r->type = AST_IDENTIFIER;
-				r->leaves.AST_IDENTIFIER.str = tkn->nxt->str;
-				r->leaves.AST_IDENTIFIER.siz = tkn->nxt->siz;
-
-				ast->type = AST_VARDEF;
-				ast->leaves.AST_VARDEF.l = l;
-				ast->leaves.AST_VARDEF.r = r;
 				tkn = tkn->nxt;
+
+				ast_new_branch(branch);
+				branch->top_branch->type = AST_IDENTIFIER;
+				branch->top_branch->value.str = tkn->str;
+				branch->top_branch->value.siz = tkn->siz;
 				break;
 			default: 
 				fprintf(stderr, "ERROR: '%.*s' is not handled in 'data'\n", tkn->siz, tkn->str); 
@@ -289,14 +407,43 @@ statements_to_ast() {
 		}
 		tkn = tkn->nxt;
 		if (!tkn) {
-			ast->stat = ast->stat->nxt;
-			tkn = ast->stat->htkn;
+			int is_segment = root.stat->htkn->type == TKN_SEGMENT;
+			root.stat = root.stat->nxt;
+			if (!root.stat) continue;
+			tkn = root.stat->htkn;
+			if (is_segment) continue;
+			ast_new_branch(&root);
+			branch = root.top_branch;
 		}
 	}
 
-	return ast;
+	return root;
 }
 
+void
+print_ast(ast_t root, int depth) {
+	if (root.branches) {
+		for(int i = 0; i < depth; i++) printf("  ");
+		printf("%s {\n", ast_type_str[root.type]);
+		for (unsigned int i = 0; i < root.branches_siz; i++) {
+			print_ast(root.branches[i], depth + 1);
+		}
+		for(int i = 0; i < depth; i++) printf("  ");
+		printf("}\n");
+	} else {
+		for(int i = 0; i < depth; i++) printf("  ");
+		printf("%s : %.*s\n", ast_type_str[root.type], root.value.siz, root.value.str);
+	}
+}
+
+void
+free_ast(ast_t ast) {
+	if (!ast.branches) return;
+	for (unsigned int i = 0; i < ast.branches_siz; i++) {
+		free_ast(ast.branches[i]);
+	}
+	free(ast.branches);
+}
 
 int
 main(int argc, char **argv) {
@@ -317,19 +464,21 @@ main(int argc, char **argv) {
 	fclose(f);
 
 
-	ast_t *ast = statements_to_ast();
+	ast_t ast = statements_to_ast();
 
-	while (ast->hstat) {
-		while (ast->hstat->htkn){
-			ast->hstat->tkn =  ast->hstat->htkn;
-			ast->hstat->htkn = ast->hstat->htkn->nxt;
-			free(ast->hstat->tkn);
+	print_ast(ast, 0);
+
+	while (ast.hstat) {
+		while (ast.hstat->htkn){
+			ast.hstat->tkn =  ast.hstat->htkn;
+			ast.hstat->htkn = ast.hstat->htkn->nxt;
+			free(ast.hstat->tkn);
 		}
-		ast->stat =  ast->hstat;
-		ast->hstat = ast->hstat->nxt;
-		free(ast->stat);
+		ast.stat =  ast.hstat;
+		ast.hstat = ast.hstat->nxt;
+		free(ast.stat);
 	}
-	free(ast);
+	free_ast(ast);
 
 	src -= f_siz;
 	free(src);
