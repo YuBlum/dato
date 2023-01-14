@@ -20,6 +20,7 @@ typedef struct token {
 		TKN_KEYWORD,
 		TKN_INTEGER,
 		TKN_UNKNOWN,
+		TKN_COUNT,
 	}  type;
 	char *str;
 	int siz;
@@ -59,6 +60,7 @@ typedef struct ast {
 		AST_PLUS,
 		AST_RETURN,
 		AST_VAR,
+		AST_COUNT,
 	} type;
 	union {
 		struct {
@@ -87,6 +89,8 @@ char *ast_type_str[] = {
 	"VAR",
 };
 
+
+
 static char *src;
 static const char *const empty  = " \n";
 static const char *const number = "0123456789";
@@ -98,6 +102,61 @@ static enum {
 	SEG_SYSTEM,
 	SEG_LAYOUT,
 } segment = SEG_LOGIC;
+
+typedef struct free_block {
+	unsigned int size;
+	unsigned int offset;
+	struct free_block *nxt;
+	struct free_block *prv;
+} free_block_t;
+
+#define ARENA_ALLOC_AMOUNT 1024
+struct {
+	unsigned char *buf;
+	unsigned int cap;
+	unsigned int offset;
+	free_block_t *block;
+	free_block_t *hblock;
+} arena = {0};
+
+free_block_t *
+arena_find_free(unsigned int amount) {
+	if (!arena.hblock) return NULL;
+	assert(0 && "arena_find_free not implemented");
+}
+
+void *
+arena_alloc(unsigned int amount) {
+	unsigned int rest = amount & (sizeof(void *) - 1);
+	if (rest != 0) {
+		amount += sizeof(void *) - rest;
+	}
+	free_block_t *block = NULL;
+	void *memory = NULL;
+	if (arena.offset + amount >= arena.cap) {
+		arena.cap += ARENA_ALLOC_AMOUNT;
+		if (arena.buf) {
+			block = arena_find_free(amount);
+		}
+		if (!block) {
+			arena.buf	= arena.buf ? realloc(arena.buf, arena.cap)
+														: malloc(arena.cap);
+			memory = arena.buf + arena.offset;
+			arena.offset += amount;
+		}
+	}
+
+	return NULL;
+}
+
+void
+free_arena() {
+	while (harena) {
+		arena = harena;
+		harena = harena->nxt;
+		free(arena);
+	}
+}
 
 void
 print_token(token_t *tkn) {
@@ -168,6 +227,7 @@ file_to_tokens(token_t *prv) {
 	tkn->siz = siz;
 	tkn->str = str;
 	tkn->type = type;
+	tkn->nxt = NULL;
 	
 	if (prv) prv->nxt = tkn;
 
@@ -177,19 +237,19 @@ file_to_tokens(token_t *prv) {
 statement_t *
 tokens_to_statements(statement_t *prv) {
 	if (src[0] == '\0') return NULL;
-	statement_t *stat = malloc(sizeof(statement_t));
-	stat->tkn = NULL;
-	stat->htkn = NULL;
+	token_t *tkn = NULL;
+	token_t *htkn = NULL;
 
 	do {
-		stat->tkn = file_to_tokens(stat->tkn);
-		if (!stat->htkn) stat->htkn = stat->tkn;
-	} while (stat->tkn);
+		tkn = file_to_tokens(tkn);
+		if (!htkn && tkn) htkn = tkn;
+	} while (tkn);
 
-	if (stat->htkn == NULL) {
-		free(stat);
-		return NULL;
-	}
+	if (htkn == NULL) return NULL;
+
+	statement_t *stat = malloc(sizeof(statement_t));
+	stat->tkn = tkn;
+	stat->htkn = htkn;
 
 	if (prv) prv->nxt = stat;
 
@@ -330,6 +390,7 @@ statements_to_ast() {
 	int count;
 	do {
 		root.stat = tokens_to_statements(root.stat);
+		if (root.stat) print_statement(root.stat);
 		if (!root.hstat && root.stat) root.hstat = root.stat;
 		count++;
 	} while(root.stat);
@@ -396,7 +457,7 @@ statements_to_ast() {
 				branch->top_branch->value.siz = tkn->siz;
 				break;
 			default: 
-				fprintf(stderr, "ERROR: '%.*s' is not handled in 'data'\n", tkn->siz, tkn->str); 
+				fprintf(stderr, "ERROR: '%d a.k.a %.*s' is not handled in 'data'\n", tkn->type, tkn->siz, tkn->str); 
 				exit(1);
 				break;
 			}
@@ -463,7 +524,6 @@ main(int argc, char **argv) {
 	fread(src, f_siz, 1, f);
 	fclose(f);
 
-
 	ast_t ast = statements_to_ast();
 
 	print_ast(ast, 0);
@@ -480,8 +540,11 @@ main(int argc, char **argv) {
 	}
 	free_ast(ast);
 
+	free_arena();
+
 	src -= f_siz;
 	free(src);
+
 	return 0;
 }
 
