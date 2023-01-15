@@ -83,9 +83,9 @@ arena_alloc(unsigned int amount) {
 		if (free_block) {
 			memory = arena->buf + free_block->offset;
 			unsigned int diff = free_block->size - amount;
+			printf("arena: %d, offset: %d, block-offset: %d, size: %d, block: %ld\n", arena->id, arena->offset, free_block->offset, free_block->size, (unsigned char *)free_block - arena->buf);
 			free_block->size -= diff;
 			free_block->free = 0;
-			printf("arena: %d, offset: %d, block-offset: %d\n", arena->id, arena->offset, free_block->offset);
 			if (diff != 0) {
 				memory_block_t *new_block = (memory_block_t *)(arena->buf + arena->offset);
 				arena->offset += BLOCK_IN_BYTES;
@@ -95,6 +95,9 @@ arena_alloc(unsigned int amount) {
 				new_block->prv = free_block;
 				new_block->nxt = free_block->nxt;
 				free_block->nxt = new_block;
+				if (!new_block->nxt) {
+					arena->block = new_block;
+				}
 				printf("free: arena: %d, offset: %d, block-offset: %d, block: %ld\n", arena->id, arena->offset, new_block->offset, (unsigned char *)new_block - arena->buf);
 			}
 			break;
@@ -144,16 +147,12 @@ arena_free(void *memory) {
 		block->free = 1;
 		if (block->nxt && block->nxt->free) {
 			memory_block_t *del_block = block->nxt;
-			block->size += del_block->size;
 			block->nxt = del_block->nxt;
+			block->nxt->prv = block;
 			if ((void *)del_block==arena->buf + block->offset + block->size) {
-				block->size += BLOCK_IN_BYTES;
+				block->size += del_block->size + BLOCK_IN_BYTES;
 			} else {
-				if (del_block->prv) del_block->prv->nxt = del_block->nxt;
-				else {
-					arena->hblock = del_block->nxt;
-					arena->block  = del_block->nxt;
-				}
+				block->size += del_block->size;
 				del_block->nxt = NULL;
 				if (!arena->hublock) {
 					del_block->prv = NULL;
@@ -165,35 +164,14 @@ arena_free(void *memory) {
 			}
 		}
 		if (block->prv && block->prv->free) {
-			printf("yeas\n");
 			memory_block_t *del_block = block;
 			block = block->prv;
-			block->nxt = del_block->nxt;
+
 			if ((void *)del_block==arena->buf + block->offset + block->size) {
 				block->size += del_block->size + BLOCK_IN_BYTES;
+				block->nxt = del_block->nxt;
 			} else {
-				memory_block_t *new_block = del_block - block->size;
-				del_block = block;
-				new_block->size += del_block->size;
-				new_block->nxt = del_block->nxt;
-				new_block->free = 1;
-				if (del_block->prv) {
-					new_block->prv = del_block->prv;
-					new_block->prv->nxt = new_block;
-				} else {
-					new_block->prv = NULL;
-					arena->hblock = new_block;
-					arena->block  = new_block;
-				}
-				del_block->nxt = NULL;
-				if (!arena->hublock) {
-					del_block->prv = NULL;
-					arena->hublock = del_block;
-					arena->ublock = del_block;
-				} else {
-					arena->ublock->nxt = del_block;
-				}
-				block = new_block;
+				block = del_block;
 			}
 		}
 		memory_block_t *ublock = arena->hublock;
@@ -255,18 +233,28 @@ typedef struct {
 
 int
 main(void) { 
-	assert(0 && "memory blocks dont link when freed");
+	//(OOOO)O|(OOOO)O
+	//(OOOO)0|(OOOO)O
+	//(OOOO)0|(OOOO)0
+	//(OOOO)000000
+	//(OOOO)OOO|000|<-(OOOO)
+	//(OOOO)000|000|<-(OOOO)
+	//(OOOO)000000|[0000]|(OOOO)OOOO
+	//(OOOO)000000|[0000]|(OOOO)0000
+	//(OOOO)000000|(OOOO)00000000
 
-	int *ptr1 = arena_alloc(sizeof(test_t));
+	int *ptr1 = arena_alloc(sizeof(int));
 	printf("%p\n", ptr1);
-	arena_free(ptr1);
 	int *ptr2 = arena_alloc(sizeof(int));
 	printf("%p\n", ptr2);
+	arena_free(ptr1);
+	arena_free(ptr2);
 	int *ptr3 = arena_alloc(sizeof(test_t));
 	printf("%p\n", ptr3);
-	arena_free(ptr3);
-	int *ptr4 = arena_alloc(sizeof(test_t));
+	int *ptr4 = arena_alloc(32);
 	printf("%p\n", ptr4);
+	arena_free(ptr3);
+	arena_free(ptr4);
 
 	arena_destroy();
 	return 0;
