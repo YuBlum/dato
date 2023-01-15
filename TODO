@@ -1,0 +1,6 @@
+- operator precedence
+- parse ast to assembly
+-- keep track of the variables
+-- return in global scope should define the exit code of the program
+- add subtraction, multiplication and division operators
+- introduction to systems
