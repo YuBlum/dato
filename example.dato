@@ -7,5 +7,5 @@ u8 w;
 logic:
 x = 2;
 y = 3;
-z = y + x;
+z = y + x + 2;
 ret z;

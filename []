@@ -70,11 +70,10 @@ typedef struct ast {
 			int siz;
 		};
 	} value;
-	struct ast *branch;
-	struct ast *hbranch;
-	struct ast *nxt;
-	struct ast *prv;
-
+	struct ast *branches;
+	struct ast *top_branch;
+	unsigned int branches_siz;
+	unsigned int branches_cap;
 	statement_t *stat;
 	statement_t *hstat;
 } ast_t;
@@ -505,26 +504,29 @@ change_segment(token_t *tkn) {
 
 void
 ast_new_branch(ast_t *root) {
-	ast_t *new_branch = arena_alloc(sizeof(ast_t));
-	new_branch->hstat = root->stat;
-	new_branch->stat = root->stat;
-	new_branch->branch = NULL;
-
-	if (!root->branch) {
-		root->branch = new_branch;
-		root->hbranch = new_branch;
-	} else {
-		root->branch->nxt = new_branch;
-		new_branch->prv = root->branch;
-		root->branch = new_branch;
+	if (root->branches_cap <= root->branches_siz) {
+		if (!root->branches) {
+			root->branches_cap = 1;
+			root->branches = arena_alloc(sizeof(ast_t));
+		} else {
+			root->branches_cap *= 2;
+			root->branches = arena_realloc(root->branches, sizeof(ast_t) * root->branches_cap);
+		}
 	}
+	root->branches[root->branches_siz].hstat = root->stat;
+	root->branches[root->branches_siz].stat = root->stat;
+	root->branches[root->branches_siz].branches = NULL;
+	root->branches[root->branches_siz].branches_siz = 0;
+	root->branches[root->branches_siz].branches_cap = 0;
+	root->top_branch = &(root->branches[root->branches_siz]);
+	root->branches_siz++;
 }
 
 token_t *
 ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 	token_t *operator, *left_operand, *right_operand;
 	ast_t *branch = *cur_branch;
-	int statement_continue;
+	int statement_is_over;
 	//TODO: verify if the identifier is declared instead of assuming it is
 	if (!tkn->nxt) {
 		branch->type = type;
@@ -551,33 +553,33 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 					fprintf(stderr, "ERROR: operator '%.*s' not handled\n", operator->siz, operator->str); 
 					exit(1);
 				}
-				statement_continue = right_operand->nxt != NULL;
+				statement_is_over = !right_operand->nxt;
 
 				ast_new_branch(branch);
-				if (statement_continue) {
-					branch->branch->type = AST_SECTION;
+				if (!statement_is_over) {
+					branch->top_branch->type = AST_SECTION;
 					tkn = operator;
 				} else {
 					if (right_operand->type == TKN_IDENTIFIER) {
-						branch->branch->type = AST_IDENTIFIER;
+						branch->top_branch->type = AST_IDENTIFIER;
 					} else if (right_operand->type == TKN_INTEGER) {
-						branch->branch->type = AST_INTEGER;
+						branch->top_branch->type = AST_INTEGER;
 					} else {
 						fprintf(stderr, "ERROR: operand '%.*s' not handled\n", right_operand->siz, right_operand->str); 
 						exit(1);
 					}
-					branch->branch->value.str = right_operand->str;
-					branch->branch->value.siz = right_operand->siz;
+					branch->top_branch->value.str = right_operand->str;
+					branch->top_branch->value.siz = right_operand->siz;
 					tkn = right_operand;
 				}
 
 				ast_new_branch(branch);
-				branch->branch->type = type;
-				branch->branch->value.str = left_operand->str;
-				branch->branch->value.siz = left_operand->siz;
+				branch->top_branch->type = type;
+				branch->top_branch->value.str = left_operand->str;
+				branch->top_branch->value.siz = left_operand->siz;
 
-				if (statement_continue) {
-					branch = branch->branch->prv;
+				if (!statement_is_over) {
+					branch = &(branch->branches[0]);
 				}
 				break;
 			default:
@@ -596,32 +598,31 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 	return tkn;
 }
 
-ast_t *
+ast_t
 statements_to_ast() {
-	ast_t *root = arena_alloc(sizeof(ast_t));
-	root->type = AST_PROGRAM;
-	root->branch = NULL;
-	root->hbranch = NULL;
-	root->nxt = NULL;
-	root->prv = NULL;
+	ast_t root;
+	root.branches = NULL;
+	root.branches_siz = 0;
+	root.branches_cap = 0;
+	root.type = AST_PROGRAM;
 
-	root->stat = NULL;
-	root->hstat = NULL;
+	root.stat = NULL;
+	root.hstat = NULL;
 	int count;
 	do {
-		root->stat = tokens_to_statements(root->stat);
-		if (root->stat) print_statement(root->stat);
-		if (!root->hstat && root->stat) root->hstat = root->stat;
+		root.stat = tokens_to_statements(root.stat);
+		if (root.stat) print_statement(root.stat);
+		if (!root.hstat && root.stat) root.hstat = root.stat;
 		count++;
-	} while(root->stat);
+	} while(root.stat);
 
-	root->stat = root->hstat;
-	token_t *tkn = root->stat->htkn;
-	ast_new_branch(root);
-	ast_t *branch = root->branch;
+	root.stat = root.hstat;
+	token_t *tkn = root.stat->htkn;
+	ast_new_branch(&root);
+	ast_t *branch = root.top_branch;
 
 	// TODO: semicolon error handling
-	while (root->stat) {
+	while (root.stat) {
 		switch(segment) {
 		case SEG_LOGIC:
 			switch(tkn->type) {
@@ -630,8 +631,8 @@ statements_to_ast() {
 				branch->type = AST_RETURN;
 				if (tkn->nxt) {
 					ast_new_branch(branch);
-					branch->branch->type = AST_SECTION;
-					branch = branch->branch;
+					branch->top_branch->type = AST_SECTION;
+					branch = branch->top_branch;
 				}
 				break;
 			case TKN_INTEGER:
@@ -665,16 +666,16 @@ statements_to_ast() {
 				branch->type = AST_VARDEF;
 
 				ast_new_branch(branch);
-				branch->branch->type = AST_TYPE;
-				branch->branch->value.str = tkn->str;
-				branch->branch->value.siz = tkn->siz;
+				branch->top_branch->type = AST_TYPE;
+				branch->top_branch->value.str = tkn->str;
+				branch->top_branch->value.siz = tkn->siz;
 
 				tkn = tkn->nxt;
 
 				ast_new_branch(branch);
-				branch->branch->type = AST_IDENTIFIER;
-				branch->branch->value.str = tkn->str;
-				branch->branch->value.siz = tkn->siz;
+				branch->top_branch->type = AST_IDENTIFIER;
+				branch->top_branch->value.str = tkn->str;
+				branch->top_branch->value.siz = tkn->siz;
 				break;
 			default: 
 				fprintf(stderr, "ERROR: '%d a.k.a %.*s' is not handled in 'data'\n", tkn->type, tkn->siz, tkn->str); 
@@ -688,13 +689,13 @@ statements_to_ast() {
 		}
 		tkn = tkn->nxt;
 		if (!tkn) {
-			int is_segment = root->stat->htkn->type == TKN_SEGMENT;
-			root->stat = root->stat->nxt;
-			if (!root->stat) continue;
-			tkn = root->stat->htkn;
+			int is_segment = root.stat->htkn->type == TKN_SEGMENT;
+			root.stat = root.stat->nxt;
+			if (!root.stat) continue;
+			tkn = root.stat->htkn;
 			if (is_segment) continue;
-			ast_new_branch(root);
-			branch = root->branch;
+			ast_new_branch(&root);
+			branch = root.top_branch;
 		}
 	}
 
@@ -702,20 +703,18 @@ statements_to_ast() {
 }
 
 void
-print_ast(ast_t *root, int depth) {
-	if (root->branch) {
+print_ast(ast_t root, int depth) {
+	if (root.branches) {
 		for(int i = 0; i < depth; i++) printf("  ");
-		printf("%s {\n", ast_type_str[root->type]);
-		ast_t *branch = root->hbranch;
-		while (branch) {
-			print_ast(branch, depth + 1);
-			branch = branch->nxt;
+		printf("%s {\n", ast_type_str[root.type]);
+		for (unsigned int i = 0; i < root.branches_siz; i++) {
+			print_ast(root.branches[i], depth + 1);
 		}
 		for(int i = 0; i < depth; i++) printf("  ");
 		printf("}\n");
 	} else {
 		for(int i = 0; i < depth; i++) printf("  ");
-		printf("%s : %.*s\n", ast_type_str[root->type], root->value.siz, root->value.str);
+		printf("%s : %.*s\n", ast_type_str[root.type], root.value.siz, root.value.str);
 	}
 }
 
@@ -737,7 +736,7 @@ main(int argc, char **argv) {
 	fread(src, f_siz, 1, f);
 	fclose(f);
 
-	ast_t *ast = statements_to_ast();
+	ast_t ast = statements_to_ast();
 
 	print_ast(ast, 0);
 
