@@ -74,6 +74,7 @@ typedef struct ast {
 	struct ast *hbranch;
 	struct ast *nxt;
 	struct ast *prv;
+	struct ast *root;
 
 	statement_t *stat;
 	statement_t *hstat;
@@ -363,7 +364,7 @@ file_to_tokens(token_t *prv) {
 	if (prv && prv->type == TKN_SEGMENT) return NULL;
 	char *str = src;
 	int siz, type;
-
+	unsigned int precedence;
 
 	if (strchr(letter, src[0])) {
 		while (strchr(letter, src[0]) || strchr(number, src[0])) src++;
@@ -402,12 +403,21 @@ file_to_tokens(token_t *prv) {
 			type = TKN_RPARAN;
 		} else if (strncmp(str, ",", siz) == 0) {
 			type = TKN_COMMA;
-		} else if (strncmp(str, "+", siz) == 0 ||
-					     strncmp(str, "-", siz) == 0 ||
-					     strncmp(str, "*", siz) == 0 ||
-					     strncmp(str, "/", siz) == 0 ||
-					     strncmp(str, "=", siz) == 0) {
+		} else if (strncmp(str, "+", siz) == 0) {
 			type = TKN_OPERATOR;
+			precedence = 1;
+		} else if (strncmp(str, "-", siz) == 0) { 
+			type = TKN_OPERATOR;
+			precedence = 1;
+		} else if (strncmp(str, "*", siz) == 0) { 
+			type = TKN_OPERATOR;
+			precedence = 2;
+		} else if (strncmp(str, "/", siz) == 0) { 
+			type = TKN_OPERATOR;
+			precedence = 2;
+		} else if (strncmp(str, "=", siz) == 0) {
+			type = TKN_OPERATOR;
+			precedence = 0;
 		} else {
 			type = TKN_UNKNOWN;
 		}
@@ -418,6 +428,7 @@ file_to_tokens(token_t *prv) {
 	tkn->str = str;
 	tkn->type = type;
 	tkn->nxt = NULL;
+	tkn->precedence = precedence;
 	
 	if (prv) prv->nxt = tkn;
 
@@ -430,29 +441,6 @@ tokens_to_statements(statement_t *prv) {
 	if (src[0] == '\0') return NULL;
 	token_t *tkn = NULL;
 	token_t *htkn = NULL;
-
-	// x = 10 + 10 * 20 - 3
-	// x
-	// = 
-	// 10
-	// +
-	// 10
-	// *
-	// 20
-	// -
-	// 3
-
-
-	// {(x = ((10 + (10 * 20)) - 3))}
-
-	// x = {
-	//  {
-	//    10 + {
-	//     10 * 20
-	//    }
-	//   }
-	//  } - 3
-	// }
 
 	do {
 		tkn = file_to_tokens(tkn);
@@ -505,10 +493,15 @@ change_segment(token_t *tkn) {
 
 void
 ast_new_branch(ast_t *root) {
+	if (root == NULL) {
+		fprintf(stderr, "ERROR: root is (nil)\n");
+		exit(1);
+	}
 	ast_t *new_branch = arena_alloc(sizeof(ast_t));
 	new_branch->hstat = root->stat;
 	new_branch->stat = root->stat;
 	new_branch->branch = NULL;
+	new_branch->root = root;
 
 	if (!root->branch) {
 		root->branch = new_branch;
@@ -520,11 +513,43 @@ ast_new_branch(ast_t *root) {
 	}
 }
 
+void
+ast_branch_change_root(ast_t *branch, ast_t *new_root) {
+	ast_t *prv_root = branch->root;
+	if (branch->prv) {
+		branch->prv->nxt = branch->nxt;
+	} else {
+		prv_root->hbranch = branch->nxt;
+		prv_root->branch = branch->nxt;
+	}
+	branch->prv = new_root->branch;
+	printf("%p\n", new_root->branch);
+	if (branch->prv) {
+		branch->prv->nxt = branch;
+	} else {
+		new_root->branch = branch;
+		new_root->hbranch = branch;
+	}
+}
+
+int
+ast_get_operator_type(token_t *operator) {
+	int type;
+	if (strncmp(operator->str, "=", operator->siz) == 0) {
+		type = AST_ASSIGN;
+	} else if(strncmp(operator->str, "+", operator->siz) == 0) {
+		type = AST_PLUS;
+	} else {
+		fprintf(stderr, "ERROR: operator '%.*s' not handled\n", operator->siz, operator->str); 
+		exit(1);
+	}
+	return type;
+}
+
 token_t *
 ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 	token_t *operator, *left_operand, *right_operand;
 	ast_t *branch = *cur_branch;
-	int statement_continue;
 	//TODO: verify if the identifier is declared instead of assuming it is
 	if (!tkn->nxt) {
 		branch->type = type;
@@ -543,21 +568,15 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 				left_operand = tkn;
 				operator = tkn->nxt;
 				right_operand = tkn->nxt->nxt;
-				if (strncmp(operator->str, "=", operator->siz) == 0) {
-					branch->type = AST_ASSIGN;
-				} else if(strncmp(operator->str, "+", operator->siz) == 0) {
-					branch->type = AST_PLUS;
-				} else {
-					fprintf(stderr, "ERROR: operator '%.*s' not handled\n", operator->siz, operator->str); 
-					exit(1);
-				}
-				statement_continue = right_operand->nxt != NULL;
+				branch->type = ast_get_operator_type(operator);
 
 				ast_new_branch(branch);
-				if (statement_continue) {
+				if (right_operand->nxt && right_operand->nxt->precedence > operator->precedence) {
 					branch->branch->type = AST_SECTION;
 					tkn = operator;
 				} else {
+					if (right_operand->nxt) {
+					}
 					if (right_operand->type == TKN_IDENTIFIER) {
 						branch->branch->type = AST_IDENTIFIER;
 					} else if (right_operand->type == TKN_INTEGER) {
@@ -576,7 +595,7 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 				branch->branch->value.str = left_operand->str;
 				branch->branch->value.siz = left_operand->siz;
 
-				if (statement_continue) {
+				if (right_operand->nxt && right_operand->nxt->precedence > operator->precedence) {
 					branch = branch->branch->prv;
 				}
 				break;
@@ -619,6 +638,7 @@ statements_to_ast() {
 	token_t *tkn = root->stat->htkn;
 	ast_new_branch(root);
 	ast_t *branch = root->branch;
+	ast_t *left_operand = NULL;
 
 	// TODO: semicolon error handling
 	while (root->stat) {
@@ -639,6 +659,32 @@ statements_to_ast() {
 				break;
 			case TKN_IDENTIFIER:
 				tkn=ast_handle_operator_with_type(AST_IDENTIFIER, &branch, tkn);
+				break;
+			case TKN_OPERATOR:
+				if (!tkn->nxt) {
+					fprintf(stderr, "ERROR: '%.*s' without a right operand\n", tkn->siz, tkn->str);
+					exit(1);
+				}
+				left_operand = branch;
+				branch = branch->root;
+				ast_new_branch(branch);
+				branch->branch->type = ast_get_operator_type(tkn);
+				printf("%p\n", branch->branch);
+				ast_branch_change_root(left_operand, branch->branch);
+				printf("%p\n", branch->branch);
+				ast_new_branch(branch->branch);
+				printf("break\n");
+				if (tkn->nxt->type == TKN_INTEGER) {
+					branch->branch->branch->type = AST_INTEGER;
+				} else if (tkn->nxt->type == TKN_IDENTIFIER) {
+					branch->branch->branch->type = AST_INTEGER;
+				} else {
+					fprintf(stderr, "ERROR: '%.*s' is not handled in a operation\n", tkn->nxt->siz, tkn->nxt->str); 
+					exit(1);
+				}
+				branch->branch->branch->value.siz = tkn->nxt->siz;
+				branch->branch->branch->value.str = tkn->nxt->str;
+				tkn = tkn->nxt;
 				break;
 			default: 
 				fprintf(stderr, "ERROR: '%.*s' is not handled in 'logic'\n", tkn->siz, tkn->str); 
