@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include <unistd.h>
 
 #define max(x, y) x > y ? x : y
 #define min(x, y) x < y ? x : y
@@ -89,8 +90,6 @@ char *ast_type_str[] = {
 	"VAR",
 };
 
-
-
 static char *src;
 static const char *const empty  = " \n";
 static const char *const number = "0123456789";
@@ -103,58 +102,247 @@ static enum {
 	SEG_LAYOUT,
 } segment = SEG_LOGIC;
 
-typedef struct free_block {
+typedef struct memory_block {
 	unsigned int size;
 	unsigned int offset;
-	struct free_block *nxt;
-	struct free_block *prv;
-} free_block_t;
+	struct memory_block *nxt;
+	struct memory_block *prv;
+	int free;
+} memory_block_t;
 
-#define ARENA_ALLOC_AMOUNT 1024
-struct {
+#define ARENA_PAGE 4096
+static struct {
 	unsigned char *buf;
+	unsigned char *limit;
 	unsigned int cap;
 	unsigned int offset;
-	free_block_t *block;
-	free_block_t *hblock;
-} arena = {0};
+	memory_block_t *block;
+	memory_block_t *hblock; // header block
+	memory_block_t *ublock; // unused block
+	memory_block_t *hublock; // header unused block
+} arena;
 
-free_block_t *
+#define BLOCK_IN_BYTES align_to_ptr(sizeof(memory_block_t))
+
+memory_block_t *
 arena_find_free(unsigned int amount) {
-	if (!arena.hblock) return NULL;
-	assert(0 && "arena_find_free not implemented");
+	memory_block_t *block = NULL;
+	block = arena.hblock;
+	while(block && (!block->free || block->size < amount)) {
+		block = block->nxt;
+	}
+	return block;
+}
+
+unsigned int
+align_to_ptr(int x) {
+	unsigned int rest = x & (sizeof(void *) - 1);
+	if (rest != 0) {
+		x += sizeof(void *) - rest;
+	}
+	return x;
+}
+
+void
+arena_grow(void) {
+	void *top = sbrk(0);
+	if (!arena.limit || arena.limit == top) {
+		void *tmp = sbrk(ARENA_PAGE);
+		if (!arena.buf) arena.buf = tmp;
+		arena.cap = ARENA_PAGE;
+		arena.limit = sbrk(0);
+	} else {
+		fprintf(stderr, "ERROR: couldn't grow the arena heap\n");
+	}
 }
 
 void *
 arena_alloc(unsigned int amount) {
-	unsigned int rest = amount & (sizeof(void *) - 1);
-	if (rest != 0) {
-		amount += sizeof(void *) - rest;
-	}
-	free_block_t *block = NULL;
+	if (amount == 0) amount = 1;
+	amount = align_to_ptr(amount);
+
 	void *memory = NULL;
-	if (arena.offset + amount >= arena.cap) {
-		arena.cap += ARENA_ALLOC_AMOUNT;
-		if (arena.buf) {
-			block = arena_find_free(amount);
-		}
-		if (!block) {
-			arena.buf	= arena.buf ? realloc(arena.buf, arena.cap)
-														: malloc(arena.cap);
-			memory = arena.buf + arena.offset;
-			arena.offset += amount;
-		}
+	if (!arena.buf) {
+		arena.offset 	= 0;
+		arena.cap     = 0;
+		arena.block 	= NULL;
+		arena.hblock 	= NULL;
+		arena.ublock 	= NULL;
+		arena.hublock = NULL;
+		arena.limit   = NULL;
+		arena_grow();
 	}
 
+	memory_block_t *free_block = arena_find_free(amount);
+	if (free_block) {
+		memory = arena.buf + free_block->offset;
+		unsigned int diff = free_block->size - amount;
+		free_block->size -= diff;
+		free_block->free = 0;
+		if (diff != 0) {
+			if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow();
+			memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
+			arena.offset += BLOCK_IN_BYTES;
+			new_block->free = 1;
+			new_block->size = diff;
+			new_block->offset = free_block->offset + free_block->size;
+			new_block->prv = free_block;
+			new_block->nxt = free_block->nxt;
+			free_block->nxt = new_block;
+			if (!new_block->nxt) {
+				arena.block = new_block;
+			}
+		}
+		return memory;
+	}
+	if (arena.offset + amount + BLOCK_IN_BYTES > arena.cap) arena_grow();
+	memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
+	arena.offset += BLOCK_IN_BYTES;
+	new_block->size = amount;
+	memory = arena.buf + arena.offset;
+	new_block->offset = arena.offset;
+	new_block->free = 0;
+	new_block->nxt = NULL;
+	new_block->prv = arena.block;
+	if (arena.block) arena.block->nxt = new_block;
+	arena.block = new_block;
+	if (!arena.hblock) arena.hblock = new_block;
+	arena.offset += amount;
+	return memory;
+}
+
+int
+arena_free(void *memory) {
+	if (memory == NULL) goto arena_free_invalid;
+	memory_block_t *block = NULL;
+	if ((void *)arena.buf > memory||memory >(void *)arena.buf+ARENA_PAGE){
+		goto arena_free_invalid;
+	}
+	block = arena.hblock;
+	while(arena.buf + block->offset != memory) {
+		block = block->nxt;
+		if (block == NULL) goto arena_free_invalid;
+	}
+	if (block->free) goto arena_free_invalid;
+	block->free = 1;
+	if (block->nxt && block->nxt->free) {
+		memory_block_t *del_block = block->nxt;
+		block->nxt = del_block->nxt;
+		block->nxt->prv = block;
+		if ((void *)del_block==arena.buf + block->offset + block->size) {
+			block->size += del_block->size + BLOCK_IN_BYTES;
+		} else {
+			block->size += del_block->size;
+			del_block->nxt = NULL;
+			if (!arena.hublock) {
+				del_block->prv = NULL;
+				arena.hublock = del_block;
+				arena.ublock  = del_block;
+			} else {
+				arena.ublock->nxt = del_block;
+			}
+		}
+	}
+	if (block->prv && block->prv->free) {
+		memory_block_t *del_block = block;
+		block = block->prv;
+
+		if ((void *)del_block==arena.buf + block->offset + block->size) {
+			block->size += del_block->size + BLOCK_IN_BYTES;
+			block->nxt = del_block->nxt;
+		} else {
+			block = del_block;
+		}
+	}
+	memory_block_t *ublock = arena.hublock;
+	while(ublock) {
+		if ((void *)ublock == arena.buf + block->offset + block->size) {
+			if (ublock->prv) ublock->prv->nxt = ublock->nxt;
+			else {
+				arena.hublock = ublock->nxt;
+				arena.ublock = ublock->nxt;
+			}
+			block->size += BLOCK_IN_BYTES;
+		}
+		if ((void *)ublock == arena.buf + block->offset -BLOCK_IN_BYTES){
+			if (ublock->prv) ublock->prv->nxt = ublock->nxt;
+			else {
+				arena.hublock = ublock->nxt;
+				arena.ublock = ublock->nxt;
+			}
+			memory_block_t *new_block = block - BLOCK_IN_BYTES; 
+			new_block->size += block->size + BLOCK_IN_BYTES;
+			new_block->nxt = block->nxt;
+			new_block->free = 1;
+			if (block->prv) {
+				new_block->prv = block->prv;
+				new_block->prv->nxt = new_block;
+			} else {
+				new_block->prv = NULL;
+				arena.hblock = new_block;
+				arena.block  = new_block;
+			}
+		}
+		ublock = ublock->nxt;
+	}
+	return 0;
+arena_free_invalid:
+	fprintf(stderr, "ERROR: trying to free invalid memory\n");
+	return 1;
+}
+
+void *
+arena_realloc(void *memory, unsigned int new_size) {
+	if (memory == NULL) goto arena_realloc_invalid;
+	memory_block_t *block = NULL;
+	if ((void *)arena.buf > memory||memory >(void *)arena.buf+ARENA_PAGE){
+		goto arena_realloc_invalid;
+	}
+	block = arena.hblock;
+	while(arena.buf + block->offset != memory) {
+		block = block->nxt;
+		if (block == NULL) goto arena_realloc_invalid;
+	}
+	if (block->free) goto arena_realloc_invalid;
+	if (new_size == 0) new_size = 1;
+	new_size = align_to_ptr(new_size);
+	if (block->size == new_size) {
+		return memory;
+	} else if (block->size > new_size) {
+		block->size = new_size;
+		if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow();
+		memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
+		arena.offset += BLOCK_IN_BYTES;
+		new_block->free = 1;
+		new_block->size = block->size - new_size;
+		new_block->offset = block->offset + block->size;
+		new_block->prv = block;
+		new_block->nxt = block->nxt;
+		block->nxt = new_block;
+		if (!new_block->nxt) {
+			arena.block = new_block;
+		}
+	} else {
+		unsigned char *new_memory = arena_alloc(new_size);
+		for (unsigned int i = 0; i < block->size; i++) {
+			new_memory[i] = ((unsigned char *)memory)[i];
+		}
+		arena_free(memory);
+		return new_memory;
+	}
+arena_realloc_invalid:
+	fprintf(stderr, "ERROR: trying to reallocate invalid memory\n");
 	return NULL;
 }
 
 void
-free_arena() {
-	while (harena) {
-		arena = harena;
-		harena = harena->nxt;
-		free(arena);
+arena_destroy(void) {
+	if (!arena.buf) return;
+	if (arena.limit == sbrk(0)) {
+		sbrk(-arena.cap);
+		arena.buf = NULL;
+	} else {
+		fprintf(stderr, "ERROR: couldn't destroy the arena heap\n");
 	}
 }
 
@@ -162,7 +350,6 @@ void
 print_token(token_t *tkn) {
 	printf("%s %.*s", token_type_str[tkn->type], tkn->siz, tkn->str);
 }
-
 
 token_t *
 file_to_tokens(token_t *prv) {
@@ -223,7 +410,7 @@ file_to_tokens(token_t *prv) {
 		}
 	}
 	if (type == TKN_SEMICOLON) return NULL;
-	token_t *tkn = malloc(sizeof(token_t));
+	token_t *tkn = arena_alloc(sizeof(token_t));
 	tkn->siz = siz;
 	tkn->str = str;
 	tkn->type = type;
@@ -247,7 +434,7 @@ tokens_to_statements(statement_t *prv) {
 
 	if (htkn == NULL) return NULL;
 
-	statement_t *stat = malloc(sizeof(statement_t));
+	statement_t *stat = arena_alloc(sizeof(statement_t));
 	stat->tkn = tkn;
 	stat->htkn = htkn;
 
@@ -292,10 +479,10 @@ ast_new_branch(ast_t *root) {
 	if (root->branches_cap <= root->branches_siz) {
 		if (!root->branches) {
 			root->branches_cap = 1;
-			root->branches = malloc(sizeof(ast_t));
+			root->branches = arena_alloc(sizeof(ast_t));
 		} else {
 			root->branches_cap *= 2;
-			root->branches = realloc(root->branches, sizeof(ast_t) * root->branches_cap);
+			root->branches = arena_realloc(root->branches, sizeof(ast_t) * root->branches_cap);
 		}
 	}
 	root->branches[root->branches_siz].hstat = root->stat;
@@ -520,7 +707,7 @@ main(int argc, char **argv) {
 	fseek(f, 0, SEEK_END);
 	long f_siz = ftell(f);
 	fseek(f, 0, SEEK_SET);
-	src = malloc(f_siz);
+	src = arena_alloc(f_siz);
 	fread(src, f_siz, 1, f);
 	fclose(f);
 
@@ -528,23 +715,7 @@ main(int argc, char **argv) {
 
 	print_ast(ast, 0);
 
-	while (ast.hstat) {
-		while (ast.hstat->htkn){
-			ast.hstat->tkn =  ast.hstat->htkn;
-			ast.hstat->htkn = ast.hstat->htkn->nxt;
-			free(ast.hstat->tkn);
-		}
-		ast.stat =  ast.hstat;
-		ast.hstat = ast.hstat->nxt;
-		free(ast.stat);
-	}
-	free_ast(ast);
-
-	free_arena();
-
-	src -= f_siz;
-	free(src);
-
+	arena_destroy();
 	return 0;
 }
 
