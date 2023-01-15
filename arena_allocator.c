@@ -20,8 +20,6 @@ struct {
 	memory_block_t *hblock; // header block
 	memory_block_t *ublock; // unused block
 	memory_block_t *hublock; // header unused block
-	unsigned int block_buf_offset;
-	unsigned int id;
 } arena;
 
 #define BLOCK_IN_BYTES align_to_ptr(sizeof(memory_block_t))
@@ -80,7 +78,7 @@ arena_alloc(unsigned int amount) {
 	if (free_block) {
 		memory = arena.buf + free_block->offset;
 		unsigned int diff = free_block->size - amount;
-		printf("arena: %d, offset: %d, block-offset: %d, size: %d, block: %ld\n", arena.id, arena.offset, free_block->offset, free_block->size, (unsigned char *)free_block - arena.buf);
+		printf("offset: %d, block-offset: %d, size: %d, block: %ld\n", arena.offset, free_block->offset, free_block->size, (unsigned char *)free_block - arena.buf);
 		free_block->size -= diff;
 		free_block->free = 0;
 		if (diff != 0) {
@@ -96,7 +94,7 @@ arena_alloc(unsigned int amount) {
 			if (!new_block->nxt) {
 				arena.block = new_block;
 			}
-			printf("free: arena: %d, offset: %d, block-offset: %d, block: %ld\n", arena.id, arena.offset, new_block->offset, (unsigned char *)new_block - arena.buf);
+			printf("free: offset: %d, block-offset: %d, block: %ld\n", arena.offset, new_block->offset, (unsigned char *)new_block - arena.buf);
 		}
 		return memory;
 	}
@@ -113,7 +111,7 @@ arena_alloc(unsigned int amount) {
 	arena.block = new_block;
 	if (!arena.hblock) arena.hblock = new_block;
 	arena.offset += amount;
-	printf("arena: %d, offset: %d, block-offset: %d\n", arena.id, arena.offset, new_block->offset);
+	printf("offset: %d, block-offset: %d\n", arena.offset, new_block->offset);
 	return memory;
 }
 
@@ -197,6 +195,51 @@ arena_free_invalid:
 	return 1;
 }
 
+void *
+arena_realloc(void *memory, unsigned int new_size) {
+	if (memory == NULL) goto arena_realloc_invalid;
+	memory_block_t *block = NULL;
+	if ((void *)arena.buf > memory||memory >(void *)arena.buf+ARENA_PAGE){
+		goto arena_realloc_invalid;
+	}
+	block = arena.hblock;
+	while(arena.buf + block->offset != memory) {
+		block = block->nxt;
+		if (block == NULL) goto arena_realloc_invalid;
+	}
+	if (block->free) goto arena_realloc_invalid;
+	if (new_size == 0) new_size = 1;
+	new_size = align_to_ptr(new_size);
+	if (block->size == new_size) {
+		return memory;
+	} else if (block->size > new_size) {
+		block->size = new_size;
+		if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow();
+		memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
+		arena.offset += BLOCK_IN_BYTES;
+		new_block->free = 1;
+		new_block->size = block->size - new_size;
+		new_block->offset = block->offset + block->size;
+		new_block->prv = block;
+		new_block->nxt = block->nxt;
+		block->nxt = new_block;
+		if (!new_block->nxt) {
+			arena.block = new_block;
+		}
+		printf("realloc: offset: %d, block-offset: %d, block: %ld\n", arena.offset, new_block->offset, (unsigned char *)new_block - arena.buf);
+	} else {
+		unsigned char *new_memory = arena_alloc(new_size);
+		for (unsigned int i = 0; i < block->size; i++) {
+			new_memory[i] = ((unsigned char *)memory)[i];
+		}
+		arena_free(memory);
+		return new_memory;
+	}
+arena_realloc_invalid:
+	fprintf(stderr, "ERROR: trying to reallocate invalid memory\n");
+	return NULL;
+}
+
 void
 arena_destroy(void) {
 	if (!arena.buf) return;
@@ -219,6 +262,21 @@ typedef struct {
 
 int
 main(void) { 
+	int *numbers = arena_alloc(sizeof(int) * 4);
+	numbers[0] = 10;
+	numbers[1] = 20;
+	numbers[2] = 30;
+	numbers[3] = 40;
+	numbers = arena_realloc(numbers, sizeof(int) * 8);
+	numbers[4] = 50;
+	numbers[5] = 60;
+	numbers[6] = 70;
+	numbers[7] = 80;
+
+	for (int i = 0; i < 8; i++) {
+		printf("numbers[%d] = %d\n", i, numbers[i]);
+	}
+	
 	arena_destroy();
 	return 0;
 }
