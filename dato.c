@@ -520,8 +520,8 @@ ast_branch_change_root(ast_t *branch, ast_t *new_root) {
 		branch->prv->nxt = branch->nxt;
 	} else {
 		prv_root->hbranch = branch->nxt;
-		prv_root->branch = branch->nxt;
 	}
+	branch->nxt = NULL;
 	branch->prv = new_root->branch;
 	printf("%p\n", new_root->branch);
 	if (branch->prv) {
@@ -571,12 +571,19 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 				branch->type = ast_get_operator_type(operator);
 
 				ast_new_branch(branch);
+				branch->branch->type = type;
+				branch->branch->value.str = left_operand->str;
+				branch->branch->value.siz = left_operand->siz;
+
+
+				ast_new_branch(branch);
+				if (right_operand->nxt) {
+					printf("'%s' is? %d\n", ast_type_str[branch->type], right_operand->nxt->precedence > operator->precedence);
+				}
 				if (right_operand->nxt && right_operand->nxt->precedence > operator->precedence) {
 					branch->branch->type = AST_SECTION;
 					tkn = operator;
 				} else {
-					if (right_operand->nxt) {
-					}
 					if (right_operand->type == TKN_IDENTIFIER) {
 						branch->branch->type = AST_IDENTIFIER;
 					} else if (right_operand->type == TKN_INTEGER) {
@@ -590,13 +597,8 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 					tkn = right_operand;
 				}
 
-				ast_new_branch(branch);
-				branch->branch->type = type;
-				branch->branch->value.str = left_operand->str;
-				branch->branch->value.siz = left_operand->siz;
-
 				if (right_operand->nxt && right_operand->nxt->precedence > operator->precedence) {
-					branch = branch->branch->prv;
+					branch = branch->branch;
 				}
 				break;
 			default:
@@ -668,22 +670,23 @@ statements_to_ast() {
 				left_operand = branch;
 				branch = branch->root;
 				ast_new_branch(branch);
-				branch->branch->type = ast_get_operator_type(tkn);
-				printf("%p\n", branch->branch);
-				ast_branch_change_root(left_operand, branch->branch);
-				printf("%p\n", branch->branch);
-				ast_new_branch(branch->branch);
-				printf("break\n");
+				branch = branch->branch;
+				branch->type = ast_get_operator_type(tkn);
+				ast_branch_change_root(left_operand, branch);
+				printf("end: %p\n", branch->branch->nxt);
+				printf("end: %p\n", branch->nxt);
+				ast_new_branch(branch);
 				if (tkn->nxt->type == TKN_INTEGER) {
-					branch->branch->branch->type = AST_INTEGER;
+					branch->branch->type = AST_INTEGER;
 				} else if (tkn->nxt->type == TKN_IDENTIFIER) {
-					branch->branch->branch->type = AST_INTEGER;
+					branch->branch->type = AST_IDENTIFIER;
 				} else {
 					fprintf(stderr, "ERROR: '%.*s' is not handled in a operation\n", tkn->nxt->siz, tkn->nxt->str); 
 					exit(1);
 				}
-				branch->branch->branch->value.siz = tkn->nxt->siz;
-				branch->branch->branch->value.str = tkn->nxt->str;
+				branch->branch->value.siz = tkn->nxt->siz;
+				branch->branch->value.str = tkn->nxt->str;
+				printf("end: %p\n", branch->branch->nxt);
 				tkn = tkn->nxt;
 				break;
 			default: 
@@ -785,7 +788,7 @@ main(int argc, char **argv) {
 
 	ast_t *ast = statements_to_ast();
 
-	print_ast(ast, 0);
+	//print_ast(ast, 0);
 
 	arena_destroy();
 	return 0;
