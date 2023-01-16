@@ -468,10 +468,16 @@ tokens_to_statements(statement_t *prv) {
 	unsigned int lower_precedence = 1000;
 	unsigned int precedence_limit = 999;
 	token_t *head = htkn;
-	token_t *left_operand, *right_operand, *nxt_token, *nxt_head;
-	tkn = htkn;
+	token_t *left_operand, *right_operand, *nxt_token, *nxt_head, *head_end;
+	if (head->nxt && head->nxt->type == TKN_OPERATOR) {
+		head_end = head->nxt;
+	} else {
+		head_end = head;
+	}
 	while (head) {
+		//printf("%s\n", token_type_str[head->type]);
 		nxt_head = head->nxt;
+		tkn = head;
 		while (tkn) {
 			nxt_token = tkn->nxt;
 			if (tkn->type == TKN_OPERATOR){
@@ -485,23 +491,29 @@ tokens_to_statements(statement_t *prv) {
 					fprintf(stderr, "ERROR: '%.*s' without a right operand\n", tkn->siz, tkn->str);
 					exit(1);
 				}
+				// z = x + y * 1 + 2 + 3
+				// z = x + y * 1 + 2 + 3
 				nxt_token = right_operand->nxt;
-				assert(0 && "the problem is here");
 				if (tkn->precedence > highest_precedence) {
-					highest_precedence = tkn->precedence;
-					printf("highest %.*s %.*s %.*s\n", left_operand->siz, left_operand->str, tkn->siz, tkn->str, right_operand->siz, right_operand->str);
-					if (left_operand != head) {
+					if (!right_operand->nxt || right_operand->nxt->precedence <= tkn->precedence) {
 						printf("here");
-						left_operand->prv = head->prv;
-						right_operand->nxt = head;
-						head->prv = right_operand;
-						head->nxt = nxt_token;
-						if (head == htkn) {
-							printf("arrived\n");
-							htkn = left_operand;
+						highest_precedence = tkn->precedence;
+						printf("highest %.*s %.*s %.*s\n", left_operand->siz, left_operand->str, tkn->siz, tkn->str, right_operand->siz, right_operand->str);
+						if (left_operand != head) {
+							left_operand->prv = head->prv;
+							right_operand->nxt = head;
+							head->prv = right_operand;
+							nxt_token->prv->nxt = head->nxt;
+							//head_end->nxt = nxt_token;
+							//head->nxt = nxt_token;
+							if (head == htkn) {
+								printf("arrived\n");
+								htkn = left_operand;
+							}
 							head = left_operand;
+							nxt_head = right_operand->nxt;
 						}
-						nxt_head = right_operand->nxt;
+					} else {
 					}
 				}
 			}
