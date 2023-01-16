@@ -27,6 +27,7 @@ typedef struct token {
 	int siz;
 	unsigned int precedence;
 	struct token *nxt;
+	struct token *prv;
 } token_t;
 
 typedef struct statement {
@@ -437,6 +438,7 @@ file_to_tokens(token_t *prv) {
 	tkn->type = type;
 	tkn->nxt = NULL;
 	tkn->precedence = precedence;
+	tkn->prv = prv;
 	
 	if (prv) prv->nxt = tkn;
 
@@ -449,15 +451,67 @@ tokens_to_statements(statement_t *prv) {
 	if (src[0] == '\0') return NULL;
 	token_t *tkn = NULL;
 	token_t *htkn = NULL;
+	token_t *tail;
+
 
 	do {
 		tkn = file_to_tokens(tkn);
-		if (tkn && tkn->type == TKN_OPERATOR) {
+		if (tkn) {
+			tail = tkn;
+			if (!htkn) htkn = tkn;
 		}
-		if (!htkn && tkn) htkn = tkn;
 	} while (tkn);
 
 	if (htkn == NULL) return NULL;
+
+	unsigned int highest_precedence = 0;
+	unsigned int lower_precedence = 1000;
+	unsigned int precedence_limit = 999;
+	token_t *head = htkn;
+	token_t *left_operand, *right_operand, *nxt_token, *nxt_head;
+	tkn = htkn;
+	while (head) {
+		nxt_head = head->nxt;
+		while (tkn) {
+			nxt_token = tkn->nxt;
+			if (tkn->type == TKN_OPERATOR){
+				left_operand = tkn->prv;
+				if (!left_operand) {
+					fprintf(stderr, "ERROR: '%.*s' without a left operand\n", tkn->siz, tkn->str);
+					exit(1);
+				}
+				right_operand = tkn->nxt;
+				if (!right_operand) {
+					fprintf(stderr, "ERROR: '%.*s' without a right operand\n", tkn->siz, tkn->str);
+					exit(1);
+				}
+				nxt_token = right_operand->nxt;
+				assert(0 && "the problem is here");
+				if (tkn->precedence > highest_precedence) {
+					highest_precedence = tkn->precedence;
+					printf("highest %.*s %.*s %.*s\n", left_operand->siz, left_operand->str, tkn->siz, tkn->str, right_operand->siz, right_operand->str);
+					if (left_operand != head) {
+						printf("here");
+						left_operand->prv = head->prv;
+						right_operand->nxt = head;
+						head->prv = right_operand;
+						head->nxt = nxt_token;
+						if (head == htkn) {
+							printf("arrived\n");
+							htkn = left_operand;
+							head = left_operand;
+						}
+						nxt_head = right_operand->nxt;
+					}
+				}
+			}
+			tkn = nxt_token;
+		}
+		//if (precedence_limit == 999) precedence_limit = higher_precedence;
+		//precedence_limit--;
+		highest_precedence = 0;
+		head = nxt_head;
+	}
 
 	statement_t *stat = arena_alloc(sizeof(statement_t));
 	stat->tkn = tkn;
