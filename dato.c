@@ -59,7 +59,10 @@ typedef struct ast {
 		AST_INTEGER,
 		AST_SECTION,
 		AST_ASSIGN,
-		AST_PLUS,
+		AST_ADD,
+		AST_SUB,
+		AST_MUL,
+		AST_DIV,
 		AST_RETURN,
 		AST_VAR,
 		AST_COUNT,
@@ -76,6 +79,8 @@ typedef struct ast {
 	struct ast *prv;
 	struct ast *root;
 
+	unsigned int precedence;
+
 	statement_t *stat;
 	statement_t *hstat;
 } ast_t;
@@ -88,7 +93,10 @@ char *ast_type_str[] = {
 	"INTEGER",
 	"SECTION",
 	"ASSIGN",
-	"PLUS",
+	"ADD",
+	"SUB",
+	"MUL",
+	"DIV",
 	"RETURN",
 	"VAR",
 };
@@ -502,6 +510,9 @@ ast_new_branch(ast_t *root) {
 	new_branch->stat = root->stat;
 	new_branch->branch = NULL;
 	new_branch->root = root;
+	new_branch->precedence = 0;
+	new_branch->nxt = NULL;
+	new_branch->prv = NULL;
 
 	if (!root->branch) {
 		root->branch = new_branch;
@@ -521,9 +532,12 @@ ast_branch_change_root(ast_t *branch, ast_t *new_root) {
 	} else {
 		prv_root->hbranch = branch->nxt;
 	}
+	if (branch->nxt) {
+		branch->nxt->prv = branch->prv;
+	}
 	branch->nxt = NULL;
 	branch->prv = new_root->branch;
-	printf("%p\n", new_root->branch);
+	branch->root = new_root;
 	if (branch->prv) {
 		branch->prv->nxt = branch;
 	} else {
@@ -532,18 +546,19 @@ ast_branch_change_root(ast_t *branch, ast_t *new_root) {
 	}
 }
 
-int
-ast_get_operator_type(token_t *operator) {
-	int type;
-	if (strncmp(operator->str, "=", operator->siz) == 0) {
-		type = AST_ASSIGN;
-	} else if(strncmp(operator->str, "+", operator->siz) == 0) {
-		type = AST_PLUS;
+void
+token_operator_to_ast_operator(token_t *tkn, ast_t *ast) {
+	if (strncmp(tkn->str, "=", tkn->siz) == 0) {
+		ast->type = AST_ASSIGN;
+	} else if(strncmp(tkn->str, "+", tkn->siz) == 0) {
+		ast->type = AST_ADD;
+	} else if(strncmp(tkn->str, "*", tkn->siz) == 0) {
+		ast->type = AST_MUL;
 	} else {
-		fprintf(stderr, "ERROR: operator '%.*s' not handled\n", operator->siz, operator->str); 
+		fprintf(stderr, "ERROR: operator '%.*s' not handled\n", tkn->siz, tkn->str); 
 		exit(1);
 	}
-	return type;
+	ast->precedence = tkn->precedence;
 }
 
 token_t *
@@ -568,7 +583,7 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 				left_operand = tkn;
 				operator = tkn->nxt;
 				right_operand = tkn->nxt->nxt;
-				branch->type = ast_get_operator_type(operator);
+				token_operator_to_ast_operator(operator, branch);
 
 				ast_new_branch(branch);
 				branch->branch->type = type;
@@ -578,7 +593,7 @@ ast_handle_operator_with_type(int type,ast_t **cur_branch,token_t *tkn){
 
 				ast_new_branch(branch);
 				if (right_operand->nxt) {
-					printf("'%s' is? %d\n", ast_type_str[branch->type], right_operand->nxt->precedence > operator->precedence);
+					printf("'%s' precedence is %d\n", ast_type_str[branch->type], right_operand->nxt->precedence > operator->precedence);
 				}
 				if (right_operand->nxt && right_operand->nxt->precedence > operator->precedence) {
 					branch->branch->type = AST_SECTION;
@@ -625,6 +640,7 @@ statements_to_ast() {
 	root->hbranch = NULL;
 	root->nxt = NULL;
 	root->prv = NULL;
+	root->precedence = 0;
 
 	root->stat = NULL;
 	root->hstat = NULL;
@@ -641,6 +657,7 @@ statements_to_ast() {
 	ast_new_branch(root);
 	ast_t *branch = root->branch;
 	ast_t *left_operand = NULL;
+
 
 	// TODO: semicolon error handling
 	while (root->stat) {
@@ -667,14 +684,15 @@ statements_to_ast() {
 					fprintf(stderr, "ERROR: '%.*s' without a right operand\n", tkn->siz, tkn->str);
 					exit(1);
 				}
-				left_operand = branch;
-				branch = branch->root;
+				while (branch->root) {
+					if (branch->root->precedence >= branch->precedence) break;
+					left_operand = branch;
+					branch = branch->root;
+				}
 				ast_new_branch(branch);
 				branch = branch->branch;
-				branch->type = ast_get_operator_type(tkn);
+				token_operator_to_ast_operator(tkn, branch);
 				ast_branch_change_root(left_operand, branch);
-				printf("end: %p\n", branch->branch->nxt);
-				printf("end: %p\n", branch->nxt);
 				ast_new_branch(branch);
 				if (tkn->nxt->type == TKN_INTEGER) {
 					branch->branch->type = AST_INTEGER;
@@ -686,7 +704,6 @@ statements_to_ast() {
 				}
 				branch->branch->value.siz = tkn->nxt->siz;
 				branch->branch->value.str = tkn->nxt->str;
-				printf("end: %p\n", branch->branch->nxt);
 				tkn = tkn->nxt;
 				break;
 			default: 
@@ -788,7 +805,7 @@ main(int argc, char **argv) {
 
 	ast_t *ast = statements_to_ast();
 
-	//print_ast(ast, 0);
+	print_ast(ast, 0);
 
 	arena_destroy();
 	return 0;
