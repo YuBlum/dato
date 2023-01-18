@@ -27,7 +27,6 @@ typedef struct token {
 	int siz;
 	unsigned int precedence;
 	struct token *nxt;
-	struct token *prv;
 } token_t;
 
 typedef struct statement {
@@ -353,17 +352,36 @@ arena_destroy(void) {
 }
 
 void
+get_source(int argc, char **argv) {
+	if (argc < 2) {
+		fprintf(stderr, "ERROR: file path not provided\n");
+		fprintf(stderr, "Usage: %s <file-path>\n", argv[0]);
+		exit(1);
+	}
+	FILE *f = fopen(argv[1], "r");
+	if (!f) {
+		fprintf(stderr, "ERROR: could not open file %s: %s\n", argv[1], strerror(errno));
+	}
+	fseek(f, 0, SEEK_END);
+	long f_siz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	src = arena_alloc(f_siz);
+	fread(src, f_siz, 1, f);
+	fclose(f);
+}
+
+void
 print_token(token_t *tkn) {
 	printf("%s %.*s", token_type_str[tkn->type], tkn->siz, tkn->str);
 }
 
-token_t *
-file_to_tokens(token_t *prv) {
+void
+next_token(token_t **prv) {
 	while (strchr(empty, src[0])) {
-		if (src[0] == '\0') return NULL;
+		if (src[0] == '\0') { *prv = NULL; return; }
 		src++;
 	}
-	if (prv && prv->type == TKN_SEGMENT) return NULL;
+	if (*prv && (*prv)->type == TKN_SEGMENT) { *prv = NULL; return; }
 	char *str = src;
 	int siz, type;
 	unsigned int precedence;
@@ -424,45 +442,37 @@ file_to_tokens(token_t *prv) {
 			type = TKN_UNKNOWN;
 		}
 	}
-	if (type == TKN_SEMICOLON) return NULL;
+	if (type == TKN_SEMICOLON) { *prv = NULL; return; }
 	token_t *tkn = arena_alloc(sizeof(token_t));
 	tkn->siz = siz;
 	tkn->str = str;
 	tkn->type = type;
 	tkn->nxt = NULL;
 	tkn->precedence = precedence;
-	tkn->prv = prv;
 	
-	if (prv) prv->nxt = tkn;
-
-	return tkn;
+	if (*prv) (*prv)->nxt = tkn;
+	*prv = tkn;
 }
 
-
-
-statement_t *
-tokens_to_statements(statement_t *prv) {
-	if (src[0] == '\0') return NULL;
+void
+lex(statement_t **prv) {
+	if (src[0] == '\0') { *prv = NULL; return; }
 	token_t *tkn = NULL;
 	token_t *htkn = NULL;
 
-	token_t *left = NULL;
-	token_t *right = NULL;
-
 	do {
-		tkn = file_to_tokens(tkn);
+		next_token(&tkn);
 		if (!htkn) htkn = tkn;
 	} while (tkn);
 
-	if (htkn == NULL) return NULL;
+	if (htkn == NULL) { *prv = NULL; return; }
 
 	statement_t *stt = arena_alloc(sizeof(statement_t));
 	stt->tkn = tkn;
 	stt->htkn = htkn;
 
-	if (prv) prv->nxt = stt;
-
-	return stt;
+	if (*prv) (*prv)->nxt = stt;
+	*prv = stt;
 }
 
 void
@@ -550,12 +560,12 @@ parse_expression(ast_t *root, token_t **out_tkn) {
 		fprintf(stderr, "ERROR: trying to parse a expression, but root is NULL\n");
 		exit(1);
 	}
-	if (!out_tkn) {
+	if (!out_tkn || !*out_tkn) {
 		fprintf(stderr, "ERROR: trying to parse a expression, but token is NULL\n");
 		exit(1);
 	}
 	token_t *tkn = *out_tkn;
-	ast_t *lhs = root->branch, *rhs = NULL, *expr = ast_new_branch(root, tkn);
+	ast_t *lhs = root->branch, *expr = ast_new_branch(root, tkn);
 
 	switch(tkn->type) {
 		case TKN_INTEGER:
@@ -616,8 +626,67 @@ parse_expression(ast_t *root, token_t **out_tkn) {
 	}
 }
 
+void
+parse_variable_declaration(ast_t *root, token_t **out_tkn) {
+	if (!root) {
+		fprintf(stderr, "ERROR: trying to parse a variable declaration, but root is NULL\n");
+		exit(1);
+	}
+	if (!out_tkn || !*out_tkn) {
+		fprintf(stderr, "ERROR: trying to parse a variable declaration, but token is NULL\n");
+		exit(1);
+	}
+	token_t *tkn = *out_tkn;
+	if (!tkn->nxt) {
+		fprintf(stderr, "ERROR: incomplete variable declaration\n");
+		exit(1);
+	}
+	if (tkn->nxt->type != TKN_IDENTIFIER) {
+		fprintf(stderr, "ERROR: %.*s is not a valid name for a variable\n", tkn->nxt->siz, tkn->nxt->str);
+		exit(1);
+	}
+	if (tkn->nxt->nxt) {
+		fprintf(stderr, "ERROR: expected ';' before '%.*s'\n", tkn->nxt->nxt->siz, tkn->nxt->nxt->str); 
+		exit(1);
+	}
+	ast_t *vardef = ast_new_branch(root, NULL);
+	vardef->type = AST_VARDEF;
+
+	ast_t *vartype = ast_new_branch(vardef, tkn);
+	vartype->type = AST_TYPE;
+	tkn = tkn->nxt;
+	parse_expression(vardef, &tkn);
+	*out_tkn = tkn;
+}
+
+void
+parse_keyword(ast_t **out_root, token_t *tkn) {
+	if (!out_root || !*out_root) {
+		fprintf(stderr, "ERROR: trying to parse a variable declaration, but root is NULL\n");
+		exit(1);
+	}
+	if (!tkn) {
+		fprintf(stderr, "ERROR: trying to parse a variable declaration, but token is NULL\n");
+		exit(1);
+	}
+	ast_t *root = *out_root;
+	if (strncmp(tkn->str, "ret", max(3, tkn->siz)) == 0) {
+		ast_t *ret = ast_new_branch(root, NULL);
+		ret->type = AST_RETURN;
+		if (tkn->nxt) {
+			ast_t *section = ast_new_branch(ret, NULL);
+			section->type = AST_SECTION;
+			root = section;
+		}
+	} else {
+		fprintf(stderr, "ERROR: keyword '%.*s' is not handled\n", tkn->siz, tkn->str);
+		exit(1);
+	}
+	*out_root = root;
+}
+
 ast_t *
-statements_to_ast() {
+parse() {
 	ast_t *root = arena_alloc(sizeof(ast_t));
 	root->type = AST_PROGRAM;
 	root->branch = NULL;
@@ -629,8 +698,8 @@ statements_to_ast() {
 	root->hstt = NULL;
 	int count = 0;
 	do {
-		root->stt = tokens_to_statements(root->stt);
-		if (root->stt) print_statement(root->stt);
+		lex(&root->stt);
+		//if (root->stt) print_statement(root->stt);
 		if (!root->hstt && root->stt) root->hstt = root->stt;
 		count++;
 	} while(root->stt);
@@ -638,8 +707,6 @@ statements_to_ast() {
 	root->stt = root->hstt;
 	token_t *tkn = root->stt->htkn;
 	ast_t *branch = root;
-	ast_t *left_operand = NULL;
-
 
 	// TODO: semicolon error handling
 	while (root->stt) {
@@ -648,13 +715,7 @@ statements_to_ast() {
 				switch(tkn->type) {
 				case TKN_SEGMENT: change_segment(tkn); break;
 				case TKN_KEYWORD:
-					ast_new_branch(branch, NULL);
-					branch->branch->type = AST_RETURN;
-					if (tkn->nxt) {
-						ast_new_branch(branch->branch, NULL);
-						branch->branch->branch->type = AST_SECTION;
-						branch = branch->branch->branch;
-					}
+					parse_keyword(&branch, tkn);
 					break;
 				case TKN_IDENTIFIER:
 				case TKN_INTEGER:
@@ -671,27 +732,7 @@ statements_to_ast() {
 				switch(tkn->type) {
 				case TKN_SEGMENT: change_segment(tkn); break;
 				case TKN_TYPE: 
-					if (!tkn->nxt) {
-						fprintf(stderr, "ERROR: incomplete variable declaration\n");
-						exit(1);
-					}
-					if (tkn->nxt->type != TKN_IDENTIFIER) {
-						fprintf(stderr, "ERROR: %.*s is not a valid name for a variable\n", tkn->nxt->siz, tkn->nxt->str);
-						exit(1);
-					}
-					if (tkn->nxt->nxt) {
-						fprintf(stderr, "ERROR: expected ';' before '%.*s'\n", tkn->nxt->nxt->siz, tkn->nxt->nxt->str); 
-						exit(1);
-					}
-					ast_new_branch(branch, NULL);
-					branch->branch->type = AST_VARDEF;
-
-					ast_new_branch(branch->branch, tkn);
-					branch->branch->branch->type = AST_TYPE;
-					tkn = tkn->nxt;
-
-					ast_new_branch(branch->branch, tkn);
-					branch->branch->branch->type = AST_IDENTIFIER;
+					parse_variable_declaration(branch, &tkn);
 					break;
 				default: 
 					fprintf(stderr, "ERROR: '%d a.k.a %.*s' is not handled in 'data'\n", tkn->type, tkn->siz, tkn->str); 
@@ -737,27 +778,11 @@ print_ast(ast_t *root, int depth) {
 
 int
 main(int argc, char **argv) {
-	if (argc < 2) {
-		fprintf(stderr, "ERROR: file path not provided\n");
-		fprintf(stderr, "Usage: %s <file-path>\n", argv[0]);
-		exit(1);
-	}
-	FILE *f = fopen(argv[1], "r");
-	if (!f) {
-		fprintf(stderr, "ERROR: could not open file %s: %s\n", argv[1], strerror(errno));
-	}
-	fseek(f, 0, SEEK_END);
-	long f_siz = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	src = arena_alloc(f_siz);
-	fread(src, f_siz, 1, f);
-	fclose(f);
+	get_source(argc, argv);
 
-	ast_t *ast = statements_to_ast();
-
+	ast_t *ast = parse();
 	print_ast(ast, 0);
 
 	arena_destroy();
 	return 0;
 }
-
