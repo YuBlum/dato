@@ -1,0 +1,7 @@
+expr[0] = operand+operand|operand-operand
+expr[1] = operand*operand|operand/operand
+
+expr = ast node
+
+add|sub operand = identifier|integer|expr[0]|expr[1]
+add|sub operand = identifier|integer|expr[1]
