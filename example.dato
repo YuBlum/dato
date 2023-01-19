@@ -1,12 +1,11 @@
 data:
-u1 x;
-u2 y;
-u4 z;
-u8 w;
+	u1 x;
+	u2 y;
+	u4 z;
+	u8 w;
 
 logic:
-x = 2;
-y = 3;
-z = x * y + 2 * 3;
-ret z;
-
+	x = 2;
+	y = 3;
+	z = x * y + 2 * 3;
+	ret z;

@@ -106,6 +106,11 @@ static enum {
 	SEG_LAYOUT,
 } segment = SEG_LOGIC;
 
+typedef struct {
+	char *buf;
+	unsigned int siz;
+} string_t;
+
 typedef struct memory_block {
 	unsigned int size;
 	unsigned int offset;
@@ -776,13 +781,225 @@ print_ast(ast_t *root, int depth) {
 	}
 }
 
-int
-main(int argc, char **argv) {
-	get_source(argc, argv);
+/* djb2 */
+unsigned int
+hash(char *str, unsigned int siz) {
+	unsigned int h = 5381;
+	for (unsigned int i = 0; i < siz; i++) h = ((h << 5) + h) ^ str[i];
+	return h;
+}
 
+typedef struct identifier {
+	enum {
+		ID_VARIABLE,
+		ID_SYSTEM,
+		ID_ANY,
+		ID_COUNT
+	} type;
+	char *str;
+	unsigned int siz;
+	struct identifier *nxt;
+} identifier_t;
+
+static const char *const identifier_type_str[] = {
+	"ID_VARIABLE",
+	"ID_SYSTEM",
+};
+
+static identifier_t **ids;
+static unsigned int ids_count;
+static unsigned int ids_cap = 3;
+
+void
+set_identifier(identifier_t **ids, unsigned int ids_cap, identifier_t *id) {
+	if (!ids_cap) {
+		fprintf(stderr, "ERROR: trying to set identifier, but ids capacity is 0\n");
+		exit(1);
+	}
+	if (!id) {
+		fprintf(stderr, "ERROR: trying to set identifier, but id is NULL\n");
+		exit(1);
+	}
+	if (!ids) {
+		fprintf(stderr, "ERROR: trying to set identifier, but ids is NULL\n");
+		exit(1);
+	}
+	id->nxt = NULL;
+	unsigned int idx = hash(id->str, id->siz) % ids_cap;
+	if (ids[idx] != NULL) id->nxt = ids[idx];
+	ids[idx] = id;
+}
+
+void
+ids_resize() {
+	unsigned int new_ids_cap = ids_cap * 2 + 1;
+	identifier_t **new_ids = arena_alloc(sizeof(identifier_t *) * new_ids_cap);
+	memset(new_ids, 0, sizeof(identifier_t *) * new_ids_cap);
+	if (ids != NULL) {
+		for (unsigned int i = 0; i < ids_cap; i++) {
+			if (ids[i] == NULL) continue;
+			while(ids[i]) {
+				identifier_t *nxt = ids[i]->nxt;
+				set_identifier(new_ids, new_ids_cap, ids[i]);
+				ids[i] = nxt;
+			}
+		}
+		arena_free(ids);
+	}
+	ids_cap = new_ids_cap;
+	ids = new_ids;
+}
+
+identifier_t *
+get_identifier(unsigned int type, char *str, unsigned int siz) {
+	if (!siz) {
+		fprintf(stderr, "ERROR: trying to remove identifier, but string size is 0\n");
+		exit(1);
+	}
+	if (!str) {
+		fprintf(stderr, "ERROR: trying to remove identifier, but string is NULL\n");
+		exit(1);
+	}
+	unsigned int idx = hash(str, siz) % ids_cap;
+	identifier_t *id = ids[idx];
+	while (id) {
+		if (strncmp(id->str, str, max(id->siz, siz)) == 0 && (type == ID_ANY || id->type == type)) break;
+		id = id->nxt;
+	}
+	return id;
+}
+
+identifier_t *
+add_identifier(unsigned int type, char *str, unsigned int siz) {
+	if (!siz) {
+		fprintf(stderr, "ERROR: trying to add new identifier, but string size is 0\n");
+		exit(1);
+	}
+	if (!str) {
+		fprintf(stderr, "ERROR: trying to add new identifier, but string is NULL\n");
+		exit(1);
+	}
+	if (ids == NULL) {
+		ids_resize();
+	}
+	identifier_t *id = get_identifier(type, str, siz);
+	if (!id) {
+		ids_count++;
+		if (ids_count / (float)ids_cap > 0.8f) ids_resize();
+		id = arena_alloc(sizeof(identifier_t));
+		id->type = type;
+		id->str = str;
+		id->siz = siz;
+		set_identifier(ids, ids_cap, id);
+	}
+	return id;
+}
+
+void
+remove_identifier(unsigned int type, char *str, unsigned int siz) {
+	if (!siz) {
+		fprintf(stderr, "ERROR: trying to remove identifier, but string size is 0\n");
+		exit(1);
+	}
+	if (!str) {
+		fprintf(stderr, "ERROR: trying to remove identifier, but string is NULL\n");
+		exit(1);
+	}
+	unsigned int idx = hash(str, siz) % ids_cap;
+	identifier_t *id = ids[idx];
+	identifier_t *prv = NULL;
+	while (id) {
+		if (strncmp(id->str, str, max(id->siz, siz)) == 0 && (type == ID_ANY || id->type == type)) {
+			if (!prv) {
+				ids[idx] = id->nxt;
+			} else {
+				prv->nxt = id->nxt;
+			}
+			arena_free(id);
+			ids_count--;
+			break;
+		}
+		prv = id;
+		id = id->nxt;
+	}
+	if (!id) {
+		fprintf(stderr, "ERROR: trying to remove identifier '%.*s', but it doesn't exists\n", siz, str);
+		exit(1);
+	}
+}
+
+void
+print_ids() {
+	for (unsigned int i = 0; i < ids_cap; i++) {
+		printf("ids[%u] = { ", i);
+		if (ids[i] != NULL) {
+			identifier_t *id = ids[i];
+			while (id) {
+				printf("{ %s: %.*s }", identifier_type_str[id->type], id->siz, id->str);
+				id = id->nxt;
+				if (id) printf(", ");
+			}
+		} else {
+				printf("NULL");
+		}
+		printf(" }\n");
+	}
+}
+
+string_t
+ast_operation(ast_t *root, ast_t *op) {
+	switch (op->type) {
+		case AST_VARDEF: 
+			break;
+		case AST_TYPE: 
+			break;
+		case AST_IDENTIFIER: 
+			break;
+		case AST_INTEGER: 
+			break;
+		case AST_SECTION: 
+			break;
+		case AST_ASSIGN: 
+			break;
+		case AST_ADD: 
+			break;
+		case AST_SUB: 
+			break;
+		case AST_MUL: 
+			break;
+		case AST_DIV: 
+			break;
+		case AST_RETURN: 
+			break;
+	}
+}
+
+void
+generate_code() {
 	ast_t *ast = parse();
 	print_ast(ast, 0);
 
+	ast_t *root = ast, *branch = ast->branch;
+
+	FILE *output = fopen("./output.s", "w");
+	fclose(output);
+}
+
+int
+main(int argc, char **argv) {
+	get_source(argc, argv);
+	//generate_code();
+	add_identifier(ID_VARIABLE, "count", 5);
+	add_identifier(ID_VARIABLE, "x", 1);
+	add_identifier(ID_SYSTEM, "main", 4);
+	add_identifier(ID_VARIABLE, "main", 4);
+	add_identifier(ID_SYSTEM, "foo", 3);
+	add_identifier(ID_SYSTEM, "foo2", 4);
+	add_identifier(ID_VARIABLE, "foo69", 5);
+	add_identifier(ID_VARIABLE, "i", 1);
+	add_identifier(ID_VARIABLE, "end", 3);
+	printf("%u\n", ids_count);
+	print_ids();
 	arena_destroy();
 	return 0;
 }

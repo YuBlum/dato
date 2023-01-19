@@ -6,9 +6,10 @@ DATO (DATa Oriented), is a procedural programming language that focus on data or
 - [ ] Turing-complete
 - [ ] Self-hosted
 - [ ] C function calls
+- [ ] No external dependencies
 
 ## Quick Start
-DATO code is separeted in sections, one for creating data and one for manipulating it. Heres an exemple:
+DATO code is separeted in sections, one for creating data and one for manipulating it. Heres an example:
 ```dato
 data:
 i32 x;
