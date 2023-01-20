@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <unistd.h>
+#include <math.h>
 
 #define max(x, y) x > y ? x : y
 #define min(x, y) x < y ? x : y
@@ -135,10 +136,23 @@ static struct {
 
 memory_block_t *
 arena_find_free(unsigned int amount) {
-	memory_block_t *block = NULL;
+	memory_block_t *block, *ublock;
 	block = arena.hblock;
 	while(block && (!block->free || block->size < amount)) {
 		block = block->nxt;
+	}
+	if (block) {
+		ublock = arena.hublock;
+		char *memory = block->offset + arena.buf;
+		while (ublock) {
+			if (memory < ublock && ublock < memory + block->size) {
+				if (ublock->prv) ublock->prv->nxt = ublock->nxt;
+				if (ublock->nxt) ublock->nxt->prv = ublock->prv;
+				if (ublock == arena.hublock) arena.hublock = NULL;
+				break;
+			}
+			ublock = ublock->nxt;
+		}
 	}
 	return block;
 }
@@ -153,12 +167,13 @@ align_to_ptr(int x) {
 }
 
 void
-arena_grow(void) {
+arena_grow(unsigned int amount) {
+	unsigned int pages = (int)ceil(amount / (double)ARENA_PAGE) * ARENA_PAGE;
 	void *top = sbrk(0);
 	if (!arena.limit || arena.limit == top) {
-		void *tmp = sbrk(ARENA_PAGE);
+		void *tmp = sbrk(pages);
 		if (!arena.buf) arena.buf = tmp;
-		arena.cap += ARENA_PAGE;
+		arena.cap += pages;
 		arena.limit = sbrk(0);
 		//printf("GROW! offset: %u, cap: %u\n", arena.offset, arena.cap);
 	} else {
@@ -180,7 +195,7 @@ arena_alloc(unsigned int amount) {
 		arena.ublock 	= NULL;
 		arena.hublock = NULL;
 		arena.limit   = NULL;
-		arena_grow();
+		arena_grow(1);
 	}
 
 	memory_block_t *free_block = arena_find_free(amount);
@@ -190,7 +205,7 @@ arena_alloc(unsigned int amount) {
 		free_block->size -= diff;
 		free_block->free = 0;
 		if (diff != 0) {
-			if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow();
+			if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow(BLOCK_IN_BYTES);
 			memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
 			arena.offset += BLOCK_IN_BYTES;
 			new_block->free = 1;
@@ -205,7 +220,7 @@ arena_alloc(unsigned int amount) {
 		}
 		return memory;
 	}
-	if (arena.offset + amount + BLOCK_IN_BYTES > arena.cap) arena_grow();
+	if (arena.offset + amount + BLOCK_IN_BYTES > arena.cap) arena_grow(amount);
 	memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
 	arena.offset += BLOCK_IN_BYTES;
 	new_block->size = amount;
@@ -225,7 +240,7 @@ int
 arena_free(void *memory) {
 	if (memory == NULL) goto arena_free_invalid;
 	memory_block_t *block = NULL;
-	if ((void *)arena.buf > memory||memory >(void *)arena.buf+ARENA_PAGE){
+	if ((void *)arena.buf > memory||memory >(void *)arena.buf+arena.cap){
 		goto arena_free_invalid;
 	}
 	block = arena.hblock;
@@ -293,7 +308,7 @@ arena_free(void *memory) {
 				arena.block  = new_block;
 			}
 		}
-		ublock = ublock->nxt;
+		if (ublock) ublock = ublock->nxt;
 	}
 	return 0;
 arena_free_invalid:
@@ -305,7 +320,7 @@ void *
 arena_realloc(void *memory, unsigned int new_size) {
 	if (memory == NULL) goto arena_realloc_invalid;
 	memory_block_t *block = NULL;
-	if ((void *)arena.buf > memory||memory >(void *)arena.buf+ARENA_PAGE){
+	if ((void *)arena.buf > memory||memory >(void *)arena.buf+arena.cap){
 		goto arena_realloc_invalid;
 	}
 	block = arena.hblock;
@@ -320,7 +335,7 @@ arena_realloc(void *memory, unsigned int new_size) {
 		return memory;
 	} else if (block->size > new_size) {
 		block->size = new_size;
-		if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow();
+		if (arena.offset + BLOCK_IN_BYTES > arena.cap) arena_grow(BLOCK_IN_BYTES);
 		memory_block_t *new_block=(memory_block_t *)(arena.buf+arena.offset);
 		arena.offset += BLOCK_IN_BYTES;
 		new_block->free = 1;
@@ -508,6 +523,7 @@ change_segment(token_t *tkn) {
 	} else {
 		// TODO: add position
 		fprintf(stderr, "ERROR: '%.*s' is not a segment\n", tkn->siz, tkn->str);
+		exit(1); 
 	}
 }
 
@@ -698,6 +714,7 @@ parse() {
 	root->hbranch = NULL;
 	root->nxt = NULL;
 	root->prv = NULL;
+	root->root = NULL;
 
 	root->stt = NULL;
 	root->hstt = NULL;
@@ -797,6 +814,10 @@ typedef struct identifier {
 		ID_COUNT
 	} type;
 	char *str;
+	union {
+		unsigned int datatype;
+		unsigned int returntype;
+	};
 	unsigned int siz;
 	struct identifier *nxt;
 } identifier_t;
@@ -946,60 +967,214 @@ print_ids() {
 	}
 }
 
-string_t
-ast_operation(ast_t *root, ast_t *op) {
-	switch (op->type) {
-		case AST_VARDEF: 
-			break;
-		case AST_TYPE: 
-			break;
-		case AST_IDENTIFIER: 
-			break;
-		case AST_INTEGER: 
-			break;
-		case AST_SECTION: 
-			break;
-		case AST_ASSIGN: 
-			break;
-		case AST_ADD: 
-			break;
-		case AST_SUB: 
-			break;
-		case AST_MUL: 
-			break;
-		case AST_DIV: 
-			break;
-		case AST_RETURN: 
-			break;
+void
+string_cat(string_t *str, string_t src) {
+	unsigned int idx_modify = str->siz;
+	str->siz += src.siz;
+	str->buf = arena_realloc(str->buf, str->siz);
+	for (unsigned int i = 0; i < src.siz; i++) {
+		str->buf[idx_modify + i] = src.buf[i];
 	}
 }
 
+#define string(str, siz) ((string_t){ (str), (siz) })
+#define cstring(cstr) ((string_t){ (cstr), strlen((cstr)) })
+#define cstring_cat(str, src) (string_cat(str, cstring(src)))
+
+/* DOIL - DatO Intermediate Language */
+typedef struct {
+	string_t src;
+	int *registers;
+	unsigned int registers_count;
+	unsigned int registers_cap;
+} doil_t;
+
+#define INTEGER_STRING_MAX 20
+
+unsigned int
+doil_get_register(doil_t *doil) {
+	for (unsigned int i = 0; i < doil->registers_count; i++) {
+		if (!doil->registers[i]) {
+			doil->registers[i] = 1;
+			return i;
+		}
+	}
+	if (doil->registers_cap <= doil->registers_count) {
+		doil->registers_cap = !doil->registers_cap ? 10 : doil->registers_cap * 2;
+		doil->registers = !doil->registers ? arena_alloc(sizeof(ast_t) * doil->registers_cap) : arena_realloc(doil->registers, doil->registers_cap);
+		for (unsigned int i = doil->registers_count; i < doil->registers_cap; i++) doil->registers[i] = 0;
+	}
+	doil->registers[doil->registers_count] = 1;
+	return doil->registers_count++;
+}
+
 void
-generate_code() {
-	ast_t *ast = parse();
-	print_ast(ast, 0);
+doil_clear_register(doil_t *doil, int register_index) {
+	doil->registers[register_index] = 0;
+}
 
-	ast_t *root = ast, *branch = ast->branch;
 
-	FILE *output = fopen("./output.s", "w");
-	fclose(output);
+void
+doilify_variable_definition(doil_t *doil, ast_t *def) {
+	cstring_cat(&doil->src, "def ");
+	token_t *type = def->hbranch->tkn,
+					*id 	= def->hbranch->nxt->tkn;
+	string_cat(&doil->src, string(type->str, type->siz));
+	cstring_cat(&doil->src, " ");
+	string_cat(&doil->src, string(id->str, id->siz));
+}
+
+unsigned int doilify_assignment(doil_t *doil, ast_t *asg);
+unsigned int doilify_expression(doil_t *doil, ast_t *exp);
+
+unsigned int
+doilify_expression_operator(doil_t *doil, ast_t *exp, char *operator) {
+	ast_t *lhs = exp->hbranch;
+	ast_t *rhs = exp->hbranch->nxt;
+	unsigned int lhs_register, rhs_register;
+	if (lhs->type != AST_IDENTIFIER || lhs->type != AST_INTEGER) lhs_register = doilify_expression(doil, lhs);
+	if (rhs->type != AST_IDENTIFIER || rhs->type != AST_INTEGER) rhs_register = doilify_expression(doil, rhs);
+	
+	unsigned int buf_siz = (INTEGER_STRING_MAX + 2) * 3 + strlen(operator) + 1;
+	char * buf = arena_alloc(buf_siz);
+	snprintf(buf, buf_siz, "%s r%u r%u r%u", operator, lhs_register, rhs_register, lhs_register);
+	cstring_cat(&doil->src, buf);
+	arena_free(buf);
+	
+	doil_clear_register(doil, rhs_register);
+	return lhs_register;
+}
+
+
+unsigned int
+doilify_expression(doil_t *doil, ast_t *exp) {
+	unsigned int register_index;
+	unsigned int buf_siz;
+	char *buf;
+
+	switch (exp->type) {
+		case AST_ADD:
+			register_index = doilify_expression_operator(doil, exp, "add");
+			break;
+		case AST_SUB:
+			register_index = doilify_expression_operator(doil, exp, "sub");
+			break;
+		case AST_MUL:
+			register_index = doilify_expression_operator(doil, exp, "mul");
+			break;
+		case AST_DIV:
+			register_index = doilify_expression_operator(doil, exp, "div");
+			break;
+		case AST_ASSIGN:
+			register_index = doilify_assignment(doil, exp);
+			break;
+		case AST_IDENTIFIER:
+			register_index = doil_get_register(doil);
+			buf_siz = exp->tkn->siz + INTEGER_STRING_MAX + 7;
+			buf = arena_alloc(buf_siz);
+			snprintf(buf, buf_siz, "get %.*s r%u", exp->tkn->siz, exp->tkn->str, register_index);
+			cstring_cat(&doil->src, buf);
+			arena_free(buf);
+			break;
+		case AST_INTEGER:
+			register_index = doil_get_register(doil);
+			buf_siz = exp->tkn->siz + INTEGER_STRING_MAX + 7;
+			buf = arena_alloc(buf_siz);
+			snprintf(buf, buf_siz, "set r%u %.*s", register_index, exp->tkn->siz, exp->tkn->str);
+			cstring_cat(&doil->src, buf);
+			arena_free(buf);
+			break;
+		default:
+			fprintf(stderr, "ERROR: '%s' is not a valid expression\n", ast_type_str[exp->type]);
+			exit(1);
+	}
+	return register_index;
+}
+
+unsigned int
+doilify_assignment(doil_t *doil, ast_t *asg) {
+	ast_t *id  = asg->hbranch;
+	ast_t *val = asg->hbranch->nxt;
+	unsigned int id_register = doilify_expression(doil, id);
+	unsigned int val_register = doilify_expression(doil, val);
+
+	unsigned int buf_siz = (INTEGER_STRING_MAX + 2) * 2 + 4;
+	char *buf = arena_alloc(buf_siz);
+	snprintf(buf, buf_siz, "set r%u r%u", id_register, val_register);
+	cstring_cat(&doil->src, buf);
+	arena_free(buf);
+
+	doil_clear_register(doil, id_register);
+	return val_register;
+}
+
+void
+doilify_return(doil_t *doil, ast_t *ret) {
+	(void)doil;
+	(void)ret;
+	assert(0 && "doilify_assignment not implemented");
+}
+
+string_t
+generate_doil() {
+	ast_t *root = parse();
+	//print_ast(root, 0);
+	doil_t doil = {0};
+	doil.src.siz = 0;
+	doil.src.buf = arena_alloc(1);
+
+	root->branch = root->hbranch;
+	while (root->branch) {
+		switch (root->branch->type) {
+			case AST_VARDEF: 
+				doilify_variable_definition(&doil, root->branch);
+				break;
+			case AST_ASSIGN: 
+				doil_clear_register(&doil, doilify_assignment(&doil, root->branch));
+				break;
+			case AST_RETURN: 
+				doilify_return(&doil, root->branch);
+				break;
+			default:
+				fprintf(stderr, "ERROR: '%s' is not a valid operation\n", ast_type_str[root->branch->type]);
+				exit(1);
+		}
+		cstring_cat(&doil.src, "\n");
+		root->branch = root->branch->nxt;
+	}
+	return doil.src;
+}
+
+/* generate doil code from dato code */
+string_t
+front_end() {
+	string_t doil = generate_doil();
+	printf("%.*s\n", doil.siz, doil.buf);
+	return doil;
+}
+
+void
+linux_x86_64(string_t doil) {
+	(void)doil;
+	assert(0 && "not implemented");
+}
+
+/* generate an executable from doil code */
+void
+back_end(string_t doil) {
+#if defined(__linux__) && defined(__x86_64__)
+	linux_x86_64(doil);
+#else
+	fprintf(stderr, "ERROR: dato only supports linux x86_64 operating systems\n");
+	exit(1);
+#endif
 }
 
 int
 main(int argc, char **argv) {
 	get_source(argc, argv);
-	//generate_code();
-	add_identifier(ID_VARIABLE, "count", 5);
-	add_identifier(ID_VARIABLE, "x", 1);
-	add_identifier(ID_SYSTEM, "main", 4);
-	add_identifier(ID_VARIABLE, "main", 4);
-	add_identifier(ID_SYSTEM, "foo", 3);
-	add_identifier(ID_SYSTEM, "foo2", 4);
-	add_identifier(ID_VARIABLE, "foo69", 5);
-	add_identifier(ID_VARIABLE, "i", 1);
-	add_identifier(ID_VARIABLE, "end", 3);
-	printf("%u\n", ids_count);
-	print_ids();
+	string_t doil = front_end();
+	//back_end(doil);
 	arena_destroy();
 	return 0;
 }
