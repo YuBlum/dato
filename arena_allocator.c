@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <assert.h>
+#include <stddef.h>
 
 #define HEAP_ALIGN		4096
 #define POINTER_SIZE	sizeof(void *)
@@ -27,12 +28,15 @@ typedef struct memory_block {
 	int deleted;
 } memory_block_t;
 
-static struct heap {
-	arena_t *arena;
-	arena_t *harena;
+enum {
+	ARENA_MEMORY = 0,
+	ARENA_BLOCKS,
+	ARENA_COUNT,
+};
 
-	arena_t *blocks;
-	arena_t *hblocks;
+static struct heap {
+	arena_t *arenas[ARENA_COUNT];
+	arena_t *harenas[ARENA_COUNT];
 
 	char *memory;
 	size_t size;
@@ -50,7 +54,7 @@ align_to(size_t align, size_t amount) {
 }
 
 void
-heap_grow(size_t amount, int grow_blocks) {
+heap_grow(size_t amount, int arena) {
 	amount = align_to(HEAP_ALIGN, amount) + sizeof(arena_t);
 	void *limit = sbrk(0);
 	if (heap.limit && heap.limit != limit) {
@@ -61,31 +65,20 @@ heap_grow(size_t amount, int grow_blocks) {
 	sbrk(amount);
 	heap.limit = sbrk(0);
 
-	if (!grow_blocks) {
-		arena_t *prv = heap.arena;
-		heap.arena = (void *)heap.memory + heap.size;
-		heap.arena->memory = (void *)heap.arena + sizeof(arena_t);
-		heap.arena->offset = 0;
-		heap.arena->size = amount - sizeof(arena_t);
-		heap.arena->nxt = NULL;
-		if (!heap.harena) heap.harena = heap.arena;
-		else							prv->nxt = heap.arena;
-	} else {
-		arena_t *prv = heap.blocks;
-		heap.blocks = (void *)heap.memory + heap.size;
-		heap.blocks->memory = (void *)heap.blocks + sizeof(arena_t);
-		heap.blocks->offset = 0;
-		heap.blocks->size = (amount - sizeof(arena_t)) / sizeof(memory_block_t);
-		heap.blocks->nxt = NULL;
-		if (!heap.hblocks) heap.hblocks = heap.blocks;
-		else							prv->nxt = heap.blocks;
-	}
+	arena_t *prv = heap.arenas[arena];
+	heap.arenas[arena] = (void *)heap.memory + heap.size;
+	heap.arenas[arena]->memory = (void *)heap.arenas[arena] + sizeof(arena_t);
+	heap.arenas[arena]->offset = 0;
+	heap.arenas[arena]->size = amount - sizeof(arena_t);
+	heap.arenas[arena]->nxt = NULL;
+	if (!heap.harenas[arena]) heap.harenas[arena] = heap.arenas[arena];
+	else							prv->nxt = heap.arenas[arena];
 	heap.size += amount;
 }
 
 memory_block_t *
 heap_find_free_block(size_t size) {
-	arena_t *blocks = heap.hblocks;
+	arena_t *blocks = heap.harenas[ARENA_BLOCKS];
 	while (blocks) {
 		for (size_t i = 0; i < blocks->offset; i++)
 			if (!blocks->block[i].deleted && blocks->block[i].free && blocks->block[i].size >= size) return blocks->block + i;
@@ -96,7 +89,7 @@ heap_find_free_block(size_t size) {
 
 memory_block_t *
 heap_create_block() {
-	arena_t *blocks = heap.hblocks;
+	arena_t *blocks = heap.harenas[ARENA_BLOCKS];
 	while (blocks) {
 		for (size_t i = 0; i < blocks->offset; i++)
 			if (blocks->block[i].deleted) return blocks->block + i;
@@ -107,15 +100,15 @@ heap_create_block() {
 		}
 		blocks = blocks->nxt;
 	}
-	heap_grow(1, 1);
-	blocks = heap.blocks;
+	heap_grow(1, ARENA_BLOCKS);
+	blocks = heap.arenas[ARENA_BLOCKS];
 	blocks->block[blocks->offset].free = 1;
 	blocks->block[blocks->offset].deleted = 0;
 	return blocks->block + blocks->offset++;
 }
 
 void *
-heap_alloc(size_t amount) {
+malloc(size_t amount) {
 	if (!amount) amount = 1;
 	amount = align_to(POINTER_SIZE, amount);
 	memory_block_t *free_block = heap_find_free_block(amount);
@@ -131,31 +124,47 @@ heap_alloc(size_t amount) {
 		}
 		return free_block->arena->memory + free_block->offset;
 	}
-	if (!heap.arena || heap.arena->offset + amount > heap.arena->size) heap_grow(amount, 0);
+	if (!heap.arenas[ARENA_MEMORY] || heap.arenas[ARENA_MEMORY]->offset + amount > heap.arenas[ARENA_MEMORY]->size) heap_grow(amount, ARENA_MEMORY);
 	memory_block_t *new_block = heap_create_block();
-	new_block->arena = heap.arena;
-	new_block->offset = heap.arena->offset;
+	new_block->arena = heap.arenas[ARENA_MEMORY];
+	new_block->offset = heap.arenas[ARENA_MEMORY]->offset;
 	new_block->size = amount;
 	new_block->free = 0;
-	heap.arena->offset += amount;
+	heap.arenas[ARENA_MEMORY]->offset += amount;
 	return new_block->arena->memory + new_block->offset;
 }
 
+memory_block_t *
+heap_find_block(void *memory) {
+	arena_t *blocks = heap.harenas[ARENA_BLOCKS];
+	while (blocks) {
+		for (unsigned int i = 0; i < blocks->offset; i++) {
+			printf("blocks->block %lu\n", blocks->offset);
+			if (!blocks->block[i].deleted && !blocks->block[i].free && blocks->block[i].arena->memory + blocks->block[i].offset == memory) {
+				return blocks->block + i;
+			}
+		}
+		blocks = blocks->nxt;
+	}
+	return NULL;
+}
+
 void
-heap_free(void *memory) {
-	(void)memory;
-	assert(0 && "not implemented");
+free(void *memory) {
+	memory_block_t *block = heap_find_block(memory);
+	printf("%p\n", block->free);
+	block->free = 1;
 }
 
 void *
-heap_realloc(void *memory, size_t new_size) {
+realloc(void *memory, size_t new_size) {
 	(void)memory;
 	(void)new_size;
 	assert(0 && "not implemented");
 }
 
 void
-heap_cleanup() {
+clean_up() {
 	void *limit = sbrk(0);
 	if (heap.limit && heap.limit == limit) {
 		sbrk(-heap.size);
@@ -165,23 +174,11 @@ heap_cleanup() {
 
 int
 main(void) {
-	int *numbers1 = heap_alloc(sizeof(int) * 4);
-	numbers1[0] = 10;
-	numbers1[1] = 15;
-	numbers1[2] = 20;
-	numbers1[3] = 25;
-	int *numbers2 = heap_alloc(sizeof(int) * 4);
-	numbers2[0] = 30;
-	numbers2[1] = 35;
-	numbers2[2] = 40;
-	numbers2[3] = 45;
-	for (int i = 0; i < 4; i++) {
-		printf("numbers1[%d] = %d\n", i, numbers1[i]);
-	}
-	printf("\n");
-	for (int i = 0; i < 4; i++) {
-		printf("numbers2[%d] = %d\n", i, numbers2[i]);
-	}
-	heap_cleanup();
+	void *p1 = malloc(50);
+	printf("%lu\n", (ptrdiff_t)p1);
+	void *p2 = malloc(50);
+	printf("%lu\n", (ptrdiff_t)p2);
+	free(p2);
+	clean_up();
 	return 0;
 }
