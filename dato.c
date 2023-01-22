@@ -744,9 +744,17 @@ string_cat(string_t *str, string_t src) {
 #define cstring_cat(str, src) (string_cat(str, cstring(src)))
 
 /* DOIL - DatO Intermediate Language */
-typedef struct doil_token {
+typedef struct {
+	union {
+		unsigned int reg;
+		string_t cst;
+	} val;
+	int is_reg;
+	int unused;
+} reg_or_const;
+
+typedef struct instruction {
 	enum {
-		DOIL_NONE,
 		DOIL_ADD,
 		DOIL_SUB,
 		DOIL_MUL,
@@ -756,118 +764,68 @@ typedef struct doil_token {
 		DOIL_SET,
 		DOIL_GET,
 		DOIL_RET,
-		DOIL_REG,
-		DOIL_BYTE,
-		DOIL_WORD,
-		DOIL_DWORD,
-		DOIL_QWORD,
-		DOIL_INTEGER,
-		DOIL_IDENTIFIER,
 	} type;
 	union {
-		string_t str;
-		unsigned int register_index;
-		int has_value;
+		struct {
+			unsigned int lhs;
+			unsigned int rhs;
+			unsigned int dst;
+		} ope; /*ope r0 r1 r2 = (r2 = r0 ? r1)*/
+		struct {
+			string_t name;
+			enum {
+				DOIL_BYTE,
+				DOIL_WORD,
+				DOIL_DWORD,
+				DOIL_QWORD,
+			} type;
+		} def; /*def x u8 = (var x: u8)*/
+		struct {
+			unsigned int reg;
+			string_t val;
+		} mov; /*mov r0 10 = (r0 = 10)*/
+		struct {
+			reg_or_const dst;
+			reg_or_const src;
+		} set; /*set x 10 = (x = 10)*/
+		struct {
+			string_t src;
+			unsigned int reg;
+		} get; /*get x r0 = (r0 = x)*/
+		struct {
+			reg_or_const src;
+		} ret; /*ret 20 | ret*/
 	};
-	struct doil_token *nxt;
-} doil_token_t;
 
-static const char *const doil_token_type_str[] = {
-	"none",
-	"add",
-	"sub",
-	"mul",
-	"div",
-	"def",
-	"mov",
-	"set",
-	"get",
-	"ret",
-	"r",
+	struct instruction *nxt;
+} instruction_t;
+
+const char *const doil_datatype_str[] = {
 	"byte",
 	"word",
 	"dword",
 	"qword",
-	"integer",
-	"identifier",
 };
-
-typedef struct doil_instruction {
-	enum {
-		INS_ADD,
-		INS_SUB,
-		INS_MUL,
-		INS_DIV,
-		INS_DEF,
-		INS_MOV,
-		INS_SET,
-		INS_GET,
-		INS_RET,
-	} type;
-	union {
-		struct {
-			doil_token_t lhs;
-			doil_token_t rhs;
-			doil_token_t dst;
-		} add; /*add r0 r1 r2 = (r2 = r0 + r1)*/
-		struct {
-			doil_token_t lhs;
-			doil_token_t rhs;
-			doil_token_t dst;
-		} sub; /*sub r0 r1 r2 = (r2 = r0 - r1)*/
-		struct {
-			doil_token_t lhs;
-			doil_token_t rhs;
-			doil_token_t dst;
-		} mul; /*mul r0 r1 r2 = (r2 = r0 * r1)*/
-		struct {
-			doil_token_t lhs;
-			doil_token_t rhs;
-			doil_token_t dst;
-		} div; /*div r0 r1 r2 = (r2 = r0 / r1)*/
-		struct {
-			doil_token_t name;
-			doil_token_t type;
-		} def; /*def x u8 = (var x: u8)*/
-		struct {
-			doil_token_t reg;
-			doil_token_t val;
-		} mov; /*mov r0 10 = (r0 = 10)*/
-		struct {
-			doil_token_t dst;
-			doil_token_t val;
-		} set; /*set x 10 = (x = 10)*/
-		struct {
-			doil_token_t src;
-			doil_token_t dst;
-		} get; /*get x r0 = (r0 = x)*/
-		struct {
-			doil_token_t val;
-		} ret; /*ret 20 | ret*/
-	};
-
-	struct doil_instruction *nxt;
-} doil_instruction;
 
 typedef struct {
 	int *registers;
 	unsigned int registers_count;
 	unsigned int registers_cap;
-	doil_token_t *tkn;
-	doil_token_t *htkn;
+	instruction_t *ins;
+	instruction_t *hins;
 } doil_t;
 
 #define INTEGER_STRING_MAX 20
 
-doil_token_t *
-doil_make_token(doil_t *doil, unsigned int type) {
-	doil_token_t *tkn = malloc(sizeof(doil_token_t));
-	*tkn = (doil_token_t){0};
-	tkn->type = type;
-	if (doil->tkn) doil->tkn->nxt = tkn;
-	doil->tkn = tkn;
-	if (!doil->htkn) doil->htkn = tkn;
-	return tkn;
+instruction_t *
+doil_make_instruction(doil_t *doil, unsigned int type) {
+	instruction_t *ins = malloc(sizeof(instruction_t));
+	*ins = (instruction_t){0};
+	ins->type = type;
+	if (doil->ins) doil->ins->nxt = ins;
+	doil->ins = ins;
+	if (!doil->hins) doil->hins = ins;
+	return ins;
 }
 
 unsigned int
@@ -896,19 +854,17 @@ void
 dato_variable_definition_to_doil(doil_t *doil, ast_t *def) {
 	token_t *type = def->hbranch->tkn,
 					*id 	= def->hbranch->nxt->tkn;
-	doil_token_t *tkn;
-	tkn = doil_make_token(doil, DOIL_DEF);
-	tkn = doil_make_token(doil, DOIL_IDENTIFIER);
-	tkn->str = string(id->str, id->siz);
+	instruction_t *ins = doil_make_instruction(doil, DOIL_DEF);
+	ins->def.name = string(id->str, id->siz);
 	/*TODO: add a struct for types like the identifiers, for now they are all hard coded and unsigned*/
 	if (strncmp(type->str, "i1", max(type->siz, 2)) == 0 || strncmp(type->str, "u1", max(type->siz, 2)) == 0) {
-		tkn = doil_make_token(doil, DOIL_BYTE);
+		ins->def.type = DOIL_BYTE;
 	} else if (strncmp(type->str, "i2", max(type->siz, 2)) == 0 || strncmp(type->str, "u2", max(type->siz, 2)) == 0) {
-	 	tkn = doil_make_token(doil, DOIL_WORD);
+		ins->def.type = DOIL_WORD;
 	} else if (strncmp(type->str, "i4", max(type->siz, 2)) == 0 || strncmp(type->str, "u4", max(type->siz, 2)) == 0) {
-	 	tkn = doil_make_token(doil, DOIL_DWORD);
+		ins->def.type = DOIL_DWORD;
 	} else if (strncmp(type->str, "i8", max(type->siz, 2)) == 0 || strncmp(type->str, "u8", max(type->siz, 2)) == 0) {
-	 	tkn = doil_make_token(doil, DOIL_QWORD);
+		ins->def.type = DOIL_QWORD;
 	} else {
 		fprintf(stderr, "ERROR: type '%.*s' not supported\n", type->siz, type->str);
 		exit(1);
@@ -922,29 +878,22 @@ unsigned int
 dato_expression_operator_to_doil(doil_t *doil, ast_t *exp, unsigned int operator) {
 	ast_t *lhs = exp->hbranch;
 	ast_t *rhs = exp->hbranch->nxt;
-	unsigned int lhs_register, rhs_register;
-	if (lhs->type != AST_IDENTIFIER || lhs->type != AST_INTEGER) lhs_register = dato_expression_to_doil(doil, lhs);
-	if (rhs->type != AST_IDENTIFIER || rhs->type != AST_INTEGER) rhs_register = dato_expression_to_doil(doil, rhs);
 	
-	doil_token_t *tkn;
+	instruction_t *ins = doil_make_instruction(doil, operator);
 
-	tkn = doil_make_token(doil, operator);
-
-	tkn = doil_make_token(doil, DOIL_REG);
-	tkn->register_index = lhs_register;
-	tkn = doil_make_token(doil, DOIL_REG);
-	tkn->register_index = rhs_register;
-	tkn = doil_make_token(doil, DOIL_REG);
-	tkn->register_index = lhs_register;
+	ins->ope.lhs = dato_expression_to_doil(doil, lhs);
+	ins->ope.rhs = dato_expression_to_doil(doil, rhs);
+	ins->ope.dst = ins->ope.lhs;
 	
-	doil_clear_register(doil, rhs_register);
-	return lhs_register;
+	doil_clear_register(doil, ins->ope.rhs);
+	return ins->ope.lhs;
 }
 
 unsigned int
 dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 	unsigned int register_index;
-	doil_token_t *tkn;
+
+	instruction_t *ins;
 
 	switch (exp->type) {
 		case AST_ADD:
@@ -963,20 +912,16 @@ dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 			register_index = dato_assignment_to_doil(doil, exp);
 			break;
 		case AST_IDENTIFIER:
-			register_index = doil_get_register(doil);
-			tkn = doil_make_token(doil, DOIL_GET);
-			tkn = doil_make_token(doil, DOIL_IDENTIFIER);
-			tkn->str = string(exp->tkn->str, exp->tkn->siz);
-			tkn = doil_make_token(doil, DOIL_REG);
-			tkn->register_index = register_index;
+			ins = doil_make_instruction(doil, DOIL_GET);
+			ins->get.src = string(exp->tkn->str, exp->tkn->siz);
+			ins->get.reg = doil_get_register(doil);
+			register_index = ins->get.reg;
 			break;
 		case AST_INTEGER:
-			register_index = doil_get_register(doil);
-			tkn = doil_make_token(doil, DOIL_MOV);
-			tkn = doil_make_token(doil, DOIL_REG);
-			tkn->register_index = register_index;
-			tkn = doil_make_token(doil, DOIL_INTEGER);
-			tkn->str = string(exp->tkn->str, exp->tkn->siz);
+			ins = doil_make_instruction(doil, DOIL_MOV);
+			ins->mov.reg = doil_get_register(doil);
+			ins->mov.val = string(exp->tkn->str, exp->tkn->siz);;
+			register_index = ins->mov.reg;
 			break;
 		default:
 			fprintf(stderr, "ERROR: '%s' is not a valid expression\n", ast_type_str[exp->type]);
@@ -987,45 +932,48 @@ dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 
 unsigned int
 dato_assignment_to_doil(doil_t *doil, ast_t *asg) {
-	doil_token_t *tkn;
 	ast_t *id  = asg->hbranch;
 	ast_t *val = asg->hbranch->nxt;
-	//unsigned int id_register = dato_expression_to_doil(doil, id);
+
+	instruction_t *ins = doil_make_instruction(doil, DOIL_SET);
+	if (id->type == AST_IDENTIFIER) {
+		ins->set.dst.val.cst = string(id->tkn->str, id->tkn->siz);
+	} else {
+		ins->set.dst.val.reg = dato_expression_to_doil(doil, id);
+		ins->set.dst.is_reg = 1;
+		doil_clear_register(doil, ins->set.dst.val.reg);
+	}
+
 	unsigned int val_register = dato_expression_to_doil(doil, val);
+	if (val->type == AST_INTEGER) {
+		ins->set.src.val.cst = string(val->tkn->str, val->tkn->siz);
+	} else {
+		ins->set.src.val.reg = val_register;
+		ins->set.src.is_reg = 1;
+	}
 
-	tkn = doil_make_token(doil, DOIL_SET);
-
-	tkn = doil_make_token(doil, DOIL_IDENTIFIER);
-	tkn->str = string(id->tkn->str, id->tkn->siz);
-	//tkn = doil_make_token(doil, DOIL_REG);
-	//tkn->register_index = id_register;
-
-	tkn = doil_make_token(doil, DOIL_REG);
-	tkn->register_index = val_register;
-
-	//doil_clear_register(doil, id_register);
 	return val_register;
 }
 
 void
 dato_return_to_doil(doil_t *doil, ast_t *ret) {
 	ast_t *val = ret->branch;
-	doil_token_t *tkn;
+	instruction_t *ins;
 
 	if (!val) {
-		tkn = doil_make_token(doil, DOIL_RET);
+		ins = doil_make_instruction(doil, DOIL_RET);
+		ins->ret.src.unused = 1;
 		return;
 	}
-	unsigned int val_register = dato_expression_to_doil(doil, val);
 
-	tkn = doil_make_token(doil, DOIL_RET);
-	tkn->has_value = 1;
-
-	tkn = doil_make_token(doil, DOIL_REG);
-	tkn->register_index = val_register;
-
-
-	doil_clear_register(doil, val_register);
+	ins = doil_make_instruction(doil, DOIL_RET);;
+	if (val->type == AST_INTEGER) {
+		ins->ret.src.val.cst = string(val->tkn->str, val->tkn->siz);
+	} else {
+		ins->ret.src.val.reg = dato_expression_to_doil(doil, val);
+		ins->ret.src.is_reg = 1;
+		doil_clear_register(doil, ins->ret.src.val.reg);
+	}
 }
 
 doil_t
@@ -1070,78 +1018,68 @@ doil_remove_unused_identifiers(doil_t *doil) {
 
 void
 print_doil(doil_t doil) {
-	doil.tkn = doil.htkn;
-	while (doil.tkn) {
-		switch (doil.tkn->type) {
+	doil.ins = doil.hins;
+	while (doil.ins) {
+		switch (doil.ins->type) {
 			case DOIL_ADD:
+				printf("add r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
+				break;
 			case DOIL_SUB:
+				printf("sub r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
+				break;
 			case DOIL_MUL:
+				printf("mul r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
+				break;
 			case DOIL_DIV:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				printf("div r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
 				break;
 			case DOIL_DEF:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				doil.tkn = doil.tkn->nxt;
-				printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s\n", doil_token_type_str[doil.tkn->type]);
+				printf("def %.*s %s\n", doil.ins->def.name.siz, doil.ins->def.name.buf, doil_datatype_str[doil.ins->def.type]);
 				break;
 			case DOIL_MOV:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
-				doil.tkn = doil.tkn->nxt;
-				printf("%.*s\n", doil.tkn->str.siz, doil.tkn->str.buf);
+				printf("mov r%u %.*s\n", doil.ins->mov.reg, doil.ins->mov.val.siz, doil.ins->mov.val.buf);
 				break;
 			case DOIL_SET:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				doil.tkn = doil.tkn->nxt;
-				if (doil.tkn->type == DOIL_REG) {
-					printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				if (doil.ins->set.dst.is_reg) {
+					printf("set r%u", doil.ins->set.dst.val.reg);
 				} else {
-					printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
+					printf("set %.*s", doil.ins->set.dst.val.cst.siz, doil.ins->set.dst.val.cst.buf);
 				}
-				doil.tkn = doil.tkn->nxt;
-				if (doil.tkn->type == DOIL_REG) {
-					printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				if (doil.ins->set.src.is_reg) {
+					printf(" r%u\n", doil.ins->set.src.val.reg);
 				} else {
-					printf("%.*s\n", doil.tkn->str.siz, doil.tkn->str.buf);
+						printf(" %.*s\n", doil.ins->set.src.val.cst.siz, doil.ins->set.src.val.cst.buf);
 				}
 				break;
 			case DOIL_GET:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				doil.tkn = doil.tkn->nxt;
-				printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
-				doil.tkn = doil.tkn->nxt;
-				printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				printf("get %.*s r%u\n", doil.ins->get.src.siz, doil.ins->get.src.buf, doil.ins->get.reg);
 				break;
 			case DOIL_RET:
-				printf("%s ", doil_token_type_str[doil.tkn->type]);
-				if (doil.tkn->has_value) {
-					doil.tkn = doil.tkn->nxt;
-					printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				printf("ret");
+				if (!doil.ins->ret.src.unused) {
+					if (doil.ins->ret.src.is_reg) {
+						printf(" r%u\n", doil.ins->ret.src.val.reg);
+					} else {
+						printf(" %.*s\n", doil.ins->ret.src.val.cst.siz, doil.ins->ret.src.val.cst.buf);
+					}
+				} else {
+					putchar('\n');
 				}
 				break;
 			default:
-				fprintf(stderr, "ERROR: can't print token '%s'\n", doil_token_type_str[doil.tkn->type]);
+				fprintf(stderr, "ERROR: not a valid instruction\n");
 				exit(1);
 		}
-		doil.tkn = doil.tkn->nxt;
+		doil.ins = doil.ins->nxt;
 	}
 }
 
 void
 doil_clean_up(doil_t doil) {
-	while (doil.htkn) {
-		doil.tkn = doil.htkn;
-		doil.htkn = doil.htkn->nxt;
-		free(doil.tkn);
+	while (doil.hins) {
+		doil.ins = doil.hins;
+		doil.hins = doil.hins->nxt;
+		free(doil.ins);
 	}
 	src -= f_siz;
 	free(src);
