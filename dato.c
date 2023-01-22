@@ -3,8 +3,6 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
-#include <unistd.h>
-#include <math.h>
 
 #define max(x, y) x > y ? x : y
 #define min(x, y) x < y ? x : y
@@ -58,7 +56,6 @@ typedef struct ast {
 		AST_TYPE,
 		AST_IDENTIFIER,
 		AST_INTEGER,
-		AST_SECTION,
 		AST_ASSIGN,
 		AST_ADD,
 		AST_SUB,
@@ -86,7 +83,6 @@ static const char *const ast_type_str[] = {
 	"AST_TYPE",
 	"AST_IDENTIFIER",
 	"AST_INTEGER",
-	"AST_SECTION",
 	"AST_ASSIGN",
 	"AST_ADD",
 	"AST_SUB",
@@ -96,6 +92,7 @@ static const char *const ast_type_str[] = {
 };
 
 static char *src;
+unsigned int f_siz;
 static const char *const empty  = " \t\n";
 static const char *const number = "0123456789";
 static const char *const letter = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -124,9 +121,10 @@ get_source(int argc, char **argv) {
 		fprintf(stderr, "ERROR: could not open file %s: %s\n", argv[1], strerror(errno));
 	}
 	fseek(f, 0, SEEK_END);
-	long f_siz = ftell(f);
+	f_siz = ftell(f);
 	fseek(f, 0, SEEK_SET);
-	src = malloc(f_siz);
+	src = malloc(f_siz + 1);
+	src[f_siz] = '\0';
 	fread(src, f_siz, 1, f);
 	fclose(f);
 }
@@ -231,6 +229,8 @@ lex(statement_t **prv) {
 	statement_t *stt = malloc(sizeof(statement_t));
 	stt->tkn = tkn;
 	stt->htkn = htkn;
+	stt->nxt = NULL;
+	//print_statement(stt);
 
 	if (*prv) (*prv)->nxt = stt;
 	*prv = stt;
@@ -278,6 +278,7 @@ ast_new_branch(ast_t *root, token_t *tkn) {
 	new_branch->hstt = root->stt;
 	new_branch->stt = root->stt;
 	new_branch->branch = NULL;
+	new_branch->hbranch = NULL;
 	new_branch->root = root;
 	new_branch->nxt = NULL;
 	new_branch->prv = NULL;
@@ -436,9 +437,7 @@ parse_keyword(ast_t **out_root, token_t *tkn) {
 		ast_t *ret = ast_new_branch(root, NULL);
 		ret->type = AST_RETURN;
 		if (tkn->nxt) {
-			ast_t *section = ast_new_branch(ret, NULL);
-			section->type = AST_SECTION;
-			root = section;
+			root = ret;
 		}
 	} else {
 		fprintf(stderr, "ERROR: keyword '%.*s' is not handled\n", tkn->siz, tkn->str);
@@ -448,7 +447,7 @@ parse_keyword(ast_t **out_root, token_t *tkn) {
 }
 
 ast_t *
-parse() {
+parse(void) {
 	ast_t *root = malloc(sizeof(ast_t));
 	root->type = AST_PROGRAM;
 	root->branch = NULL;
@@ -463,7 +462,7 @@ parse() {
 	do {
 		lex(&root->stt);
 		//if (root->stt) print_statement(root->stt);
-		if (!root->hstt && root->stt) root->hstt = root->stt;
+		if (!root->hstt) root->hstt = root->stt;
 		count++;
 	} while(root->stt);
 
@@ -539,6 +538,28 @@ print_ast(ast_t *root, int depth) {
 	}
 }
 
+void
+free_ast(ast_t *root) {
+	while (root->hbranch) {
+		root->branch = root->hbranch;
+		root->hbranch = root->hbranch->nxt;
+		free_ast(root->branch);
+	}
+	if (root->type == AST_PROGRAM) {
+		while (root->hstt) {
+			root->stt = root->hstt;
+			while (root->stt->htkn) {
+				root->stt->tkn = root->stt->htkn;
+				root->stt->htkn = root->stt->htkn->nxt;
+				free(root->stt->tkn);
+			}
+			root->hstt = root->hstt->nxt;
+			free(root->stt);
+		}
+	}
+	free(root);
+}
+
 /* djb2 */
 unsigned int
 hash(char *str, unsigned int siz) {
@@ -593,7 +614,7 @@ set_identifier(identifier_t **ids, unsigned int ids_cap, identifier_t *id) {
 }
 
 void
-ids_resize() {
+ids_resize(void) {
 	unsigned int new_ids_cap = ids_cap * 2 + 1;
 	identifier_t **new_ids = malloc(sizeof(identifier_t *) * new_ids_cap);
 	memset(new_ids, 0, sizeof(identifier_t *) * new_ids_cap);
@@ -691,7 +712,7 @@ remove_identifier(unsigned int type, char *str, unsigned int siz) {
 }
 
 void
-print_ids() {
+print_ids(void) {
 	for (unsigned int i = 0; i < ids_cap; i++) {
 		printf("ids[%u] = { ", i);
 		if (ids[i] != NULL) {
@@ -723,14 +744,131 @@ string_cat(string_t *str, string_t src) {
 #define cstring_cat(str, src) (string_cat(str, cstring(src)))
 
 /* DOIL - DatO Intermediate Language */
+typedef struct doil_token {
+	enum {
+		DOIL_NONE,
+		DOIL_ADD,
+		DOIL_SUB,
+		DOIL_MUL,
+		DOIL_DIV,
+		DOIL_DEF,
+		DOIL_MOV,
+		DOIL_SET,
+		DOIL_GET,
+		DOIL_RET,
+		DOIL_REG,
+		DOIL_BYTE,
+		DOIL_WORD,
+		DOIL_DWORD,
+		DOIL_QWORD,
+		DOIL_INTEGER,
+		DOIL_IDENTIFIER,
+	} type;
+	union {
+		string_t str;
+		unsigned int register_index;
+		int has_value;
+	};
+	struct doil_token *nxt;
+} doil_token_t;
+
+static const char *const doil_token_type_str[] = {
+	"none",
+	"add",
+	"sub",
+	"mul",
+	"div",
+	"def",
+	"mov",
+	"set",
+	"get",
+	"ret",
+	"r",
+	"byte",
+	"word",
+	"dword",
+	"qword",
+	"integer",
+	"identifier",
+};
+
+typedef struct doil_instruction {
+	enum {
+		INS_ADD,
+		INS_SUB,
+		INS_MUL,
+		INS_DIV,
+		INS_DEF,
+		INS_MOV,
+		INS_SET,
+		INS_GET,
+		INS_RET,
+	} type;
+	union {
+		struct {
+			doil_token_t lhs;
+			doil_token_t rhs;
+			doil_token_t dst;
+		} add; /*add r0 r1 r2 = (r2 = r0 + r1)*/
+		struct {
+			doil_token_t lhs;
+			doil_token_t rhs;
+			doil_token_t dst;
+		} sub; /*sub r0 r1 r2 = (r2 = r0 - r1)*/
+		struct {
+			doil_token_t lhs;
+			doil_token_t rhs;
+			doil_token_t dst;
+		} mul; /*mul r0 r1 r2 = (r2 = r0 * r1)*/
+		struct {
+			doil_token_t lhs;
+			doil_token_t rhs;
+			doil_token_t dst;
+		} div; /*div r0 r1 r2 = (r2 = r0 / r1)*/
+		struct {
+			doil_token_t name;
+			doil_token_t type;
+		} def; /*def x u8 = (var x: u8)*/
+		struct {
+			doil_token_t reg;
+			doil_token_t val;
+		} mov; /*mov r0 10 = (r0 = 10)*/
+		struct {
+			doil_token_t dst;
+			doil_token_t val;
+		} set; /*set x 10 = (x = 10)*/
+		struct {
+			doil_token_t src;
+			doil_token_t dst;
+		} get; /*get x r0 = (r0 = x)*/
+		struct {
+			doil_token_t val;
+		} ret; /*ret 20 | ret*/
+	};
+
+	struct doil_instruction *nxt;
+} doil_instruction;
+
 typedef struct {
-	string_t src;
 	int *registers;
 	unsigned int registers_count;
 	unsigned int registers_cap;
+	doil_token_t *tkn;
+	doil_token_t *htkn;
 } doil_t;
 
 #define INTEGER_STRING_MAX 20
+
+doil_token_t *
+doil_make_token(doil_t *doil, unsigned int type) {
+	doil_token_t *tkn = malloc(sizeof(doil_token_t));
+	*tkn = (doil_token_t){0};
+	tkn->type = type;
+	if (doil->tkn) doil->tkn->nxt = tkn;
+	doil->tkn = tkn;
+	if (!doil->htkn) doil->htkn = tkn;
+	return tkn;
+}
 
 unsigned int
 doil_get_register(doil_t *doil) {
@@ -754,76 +892,91 @@ doil_clear_register(doil_t *doil, int register_index) {
 	doil->registers[register_index] = 0;
 }
 
-
 void
-doilify_variable_definition(doil_t *doil, ast_t *def) {
-	cstring_cat(&doil->src, "def ");
+dato_variable_definition_to_doil(doil_t *doil, ast_t *def) {
 	token_t *type = def->hbranch->tkn,
 					*id 	= def->hbranch->nxt->tkn;
-	string_cat(&doil->src, string(type->str, type->siz));
-	cstring_cat(&doil->src, " ");
-	string_cat(&doil->src, string(id->str, id->siz));
+	doil_token_t *tkn;
+	tkn = doil_make_token(doil, DOIL_DEF);
+	tkn = doil_make_token(doil, DOIL_IDENTIFIER);
+	tkn->str = string(id->str, id->siz);
+	/*TODO: add a struct for types like the identifiers, for now they are all hard coded and unsigned*/
+	if (strncmp(type->str, "i1", max(type->siz, 2)) == 0 || strncmp(type->str, "u1", max(type->siz, 2)) == 0) {
+		tkn = doil_make_token(doil, DOIL_BYTE);
+	} else if (strncmp(type->str, "i2", max(type->siz, 2)) == 0 || strncmp(type->str, "u2", max(type->siz, 2)) == 0) {
+	 	tkn = doil_make_token(doil, DOIL_WORD);
+	} else if (strncmp(type->str, "i4", max(type->siz, 2)) == 0 || strncmp(type->str, "u4", max(type->siz, 2)) == 0) {
+	 	tkn = doil_make_token(doil, DOIL_DWORD);
+	} else if (strncmp(type->str, "i8", max(type->siz, 2)) == 0 || strncmp(type->str, "u8", max(type->siz, 2)) == 0) {
+	 	tkn = doil_make_token(doil, DOIL_QWORD);
+	} else {
+		fprintf(stderr, "ERROR: type '%.*s' not supported\n", type->siz, type->str);
+		exit(1);
+	}
 }
 
-unsigned int doilify_assignment(doil_t *doil, ast_t *asg);
-unsigned int doilify_expression(doil_t *doil, ast_t *exp);
+unsigned int dato_assignment_to_doil(doil_t *doil, ast_t *asg);
+unsigned int dato_expression_to_doil(doil_t *doil, ast_t *exp);
 
 unsigned int
-doilify_expression_operator(doil_t *doil, ast_t *exp, char *operator) {
+dato_expression_operator_to_doil(doil_t *doil, ast_t *exp, unsigned int operator) {
 	ast_t *lhs = exp->hbranch;
 	ast_t *rhs = exp->hbranch->nxt;
 	unsigned int lhs_register, rhs_register;
-	if (lhs->type != AST_IDENTIFIER || lhs->type != AST_INTEGER) lhs_register = doilify_expression(doil, lhs);
-	if (rhs->type != AST_IDENTIFIER || rhs->type != AST_INTEGER) rhs_register = doilify_expression(doil, rhs);
+	if (lhs->type != AST_IDENTIFIER || lhs->type != AST_INTEGER) lhs_register = dato_expression_to_doil(doil, lhs);
+	if (rhs->type != AST_IDENTIFIER || rhs->type != AST_INTEGER) rhs_register = dato_expression_to_doil(doil, rhs);
 	
-	unsigned int buf_siz = (INTEGER_STRING_MAX + 2) * 3 + strlen(operator) + 1;
-	char * buf = malloc(buf_siz);
-	snprintf(buf, buf_siz, "%s r%u r%u r%u", operator, lhs_register, rhs_register, lhs_register);
-	cstring_cat(&doil->src, buf);
-	free(buf);
+	doil_token_t *tkn;
+
+	tkn = doil_make_token(doil, operator);
+
+	tkn = doil_make_token(doil, DOIL_REG);
+	tkn->register_index = lhs_register;
+	tkn = doil_make_token(doil, DOIL_REG);
+	tkn->register_index = rhs_register;
+	tkn = doil_make_token(doil, DOIL_REG);
+	tkn->register_index = lhs_register;
 	
 	doil_clear_register(doil, rhs_register);
 	return lhs_register;
 }
 
-
 unsigned int
-doilify_expression(doil_t *doil, ast_t *exp) {
+dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 	unsigned int register_index;
-	unsigned int buf_siz;
-	char *buf;
+	doil_token_t *tkn;
 
 	switch (exp->type) {
 		case AST_ADD:
-			register_index = doilify_expression_operator(doil, exp, "add");
+			register_index = dato_expression_operator_to_doil(doil, exp, DOIL_ADD);
 			break;
 		case AST_SUB:
-			register_index = doilify_expression_operator(doil, exp, "sub");
+			register_index = dato_expression_operator_to_doil(doil, exp, DOIL_SUB);
 			break;
 		case AST_MUL:
-			register_index = doilify_expression_operator(doil, exp, "mul");
+			register_index = dato_expression_operator_to_doil(doil, exp, DOIL_MUL);
 			break;
 		case AST_DIV:
-			register_index = doilify_expression_operator(doil, exp, "div");
+			register_index = dato_expression_operator_to_doil(doil, exp, DOIL_DIV);
 			break;
 		case AST_ASSIGN:
-			register_index = doilify_assignment(doil, exp);
+			register_index = dato_assignment_to_doil(doil, exp);
 			break;
 		case AST_IDENTIFIER:
 			register_index = doil_get_register(doil);
-			buf_siz = exp->tkn->siz + INTEGER_STRING_MAX + 7;
-			buf = malloc(buf_siz);
-			snprintf(buf, buf_siz, "get %.*s r%u", exp->tkn->siz, exp->tkn->str, register_index);
-			cstring_cat(&doil->src, buf);
-			free(buf);
+			tkn = doil_make_token(doil, DOIL_GET);
+			tkn = doil_make_token(doil, DOIL_IDENTIFIER);
+			tkn->str = string(exp->tkn->str, exp->tkn->siz);
+			tkn = doil_make_token(doil, DOIL_REG);
+			tkn->register_index = register_index;
 			break;
 		case AST_INTEGER:
 			register_index = doil_get_register(doil);
-			buf_siz = exp->tkn->siz + INTEGER_STRING_MAX + 7;
-			buf = malloc(buf_siz);
-			snprintf(buf, buf_siz, "set r%u %.*s", register_index, exp->tkn->siz, exp->tkn->str);
-			cstring_cat(&doil->src, buf);
-			free(buf);
+			tkn = doil_make_token(doil, DOIL_MOV);
+			tkn = doil_make_token(doil, DOIL_REG);
+			tkn->register_index = register_index;
+			tkn = doil_make_token(doil, DOIL_INTEGER);
+			tkn->str = string(exp->tkn->str, exp->tkn->siz);
 			break;
 		default:
 			fprintf(stderr, "ERROR: '%s' is not a valid expression\n", ast_type_str[exp->type]);
@@ -833,76 +986,188 @@ doilify_expression(doil_t *doil, ast_t *exp) {
 }
 
 unsigned int
-doilify_assignment(doil_t *doil, ast_t *asg) {
+dato_assignment_to_doil(doil_t *doil, ast_t *asg) {
+	doil_token_t *tkn;
 	ast_t *id  = asg->hbranch;
 	ast_t *val = asg->hbranch->nxt;
-	unsigned int id_register = doilify_expression(doil, id);
-	unsigned int val_register = doilify_expression(doil, val);
+	//unsigned int id_register = dato_expression_to_doil(doil, id);
+	unsigned int val_register = dato_expression_to_doil(doil, val);
 
-	unsigned int buf_siz = (INTEGER_STRING_MAX + 2) * 2 + 4;
-	char *buf = malloc(buf_siz);
-	snprintf(buf, buf_siz, "set r%u r%u", id_register, val_register);
-	cstring_cat(&doil->src, buf);
-	free(buf);
+	tkn = doil_make_token(doil, DOIL_SET);
 
-	doil_clear_register(doil, id_register);
+	tkn = doil_make_token(doil, DOIL_IDENTIFIER);
+	tkn->str = string(id->tkn->str, id->tkn->siz);
+	//tkn = doil_make_token(doil, DOIL_REG);
+	//tkn->register_index = id_register;
+
+	tkn = doil_make_token(doil, DOIL_REG);
+	tkn->register_index = val_register;
+
+	//doil_clear_register(doil, id_register);
 	return val_register;
 }
 
 void
-doilify_return(doil_t *doil, ast_t *ret) {
-	(void)doil;
-	(void)ret;
-	assert(0 && "doilify_assignment not implemented");
+dato_return_to_doil(doil_t *doil, ast_t *ret) {
+	ast_t *val = ret->branch;
+	doil_token_t *tkn;
+
+	if (!val) {
+		tkn = doil_make_token(doil, DOIL_RET);
+		return;
+	}
+	unsigned int val_register = dato_expression_to_doil(doil, val);
+
+	tkn = doil_make_token(doil, DOIL_RET);
+	tkn->has_value = 1;
+
+	tkn = doil_make_token(doil, DOIL_REG);
+	tkn->register_index = val_register;
+
+
+	doil_clear_register(doil, val_register);
 }
 
-string_t
-generate_doil() {
-	ast_t *root = parse();
-	//print_ast(root, 0);
+doil_t
+doil_lex(ast_t *root) {
 	doil_t doil = {0};
-	doil.src.siz = 0;
-	doil.src.buf = malloc(1);
-
 	root->branch = root->hbranch;
 	while (root->branch) {
 		switch (root->branch->type) {
+			case AST_ADD:
+			case AST_SUB:
+			case AST_MUL:
+			case AST_DIV:
+			case AST_IDENTIFIER:
+			case AST_INTEGER:
+				fprintf(stderr, "WARNING: statement with no effect\n");
+				break;
 			case AST_VARDEF: 
-				doilify_variable_definition(&doil, root->branch);
+				dato_variable_definition_to_doil(&doil, root->branch);
 				break;
 			case AST_ASSIGN: 
-				doil_clear_register(&doil, doilify_assignment(&doil, root->branch));
+				doil_clear_register(&doil, dato_assignment_to_doil(&doil, root->branch));
 				break;
 			case AST_RETURN: 
-				doilify_return(&doil, root->branch);
+				dato_return_to_doil(&doil, root->branch);
 				break;
 			default:
 				fprintf(stderr, "ERROR: '%s' is not a valid operation\n", ast_type_str[root->branch->type]);
 				exit(1);
 		}
-		cstring_cat(&doil.src, "\n");
 		root->branch = root->branch->nxt;
 	}
-	return doil.src;
-}
-
-/* generate doil code from dato code */
-string_t
-front_end() {
-	string_t doil = generate_doil();
-	printf("%.*s\n", doil.siz, doil.buf);
+	free(doil.registers);
+	free_ast(root);
 	return doil;
 }
 
 void
-linux_x86_64(string_t doil) {
+doil_remove_unused_identifiers(doil_t *doil) {
+	(void)doil;
+	assert(0 && "not implemented");
+}
+
+void
+print_doil(doil_t doil) {
+	doil.tkn = doil.htkn;
+	while (doil.tkn) {
+		switch (doil.tkn->type) {
+			case DOIL_ADD:
+			case DOIL_SUB:
+			case DOIL_MUL:
+			case DOIL_DIV:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				break;
+			case DOIL_DEF:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				doil.tkn = doil.tkn->nxt;
+				printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s\n", doil_token_type_str[doil.tkn->type]);
+				break;
+			case DOIL_MOV:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				doil.tkn = doil.tkn->nxt;
+				printf("%.*s\n", doil.tkn->str.siz, doil.tkn->str.buf);
+				break;
+			case DOIL_SET:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				doil.tkn = doil.tkn->nxt;
+				if (doil.tkn->type == DOIL_REG) {
+					printf("%s%u ", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				} else {
+					printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
+				}
+				doil.tkn = doil.tkn->nxt;
+				if (doil.tkn->type == DOIL_REG) {
+					printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				} else {
+					printf("%.*s\n", doil.tkn->str.siz, doil.tkn->str.buf);
+				}
+				break;
+			case DOIL_GET:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				doil.tkn = doil.tkn->nxt;
+				printf("%.*s ", doil.tkn->str.siz, doil.tkn->str.buf);
+				doil.tkn = doil.tkn->nxt;
+				printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				break;
+			case DOIL_RET:
+				printf("%s ", doil_token_type_str[doil.tkn->type]);
+				if (doil.tkn->has_value) {
+					doil.tkn = doil.tkn->nxt;
+					printf("%s%u\n", doil_token_type_str[doil.tkn->type], doil.tkn->register_index);
+				}
+				break;
+			default:
+				fprintf(stderr, "ERROR: can't print token '%s'\n", doil_token_type_str[doil.tkn->type]);
+				exit(1);
+		}
+		doil.tkn = doil.tkn->nxt;
+	}
+}
+
+void
+doil_clean_up(doil_t doil) {
+	while (doil.htkn) {
+		doil.tkn = doil.htkn;
+		doil.htkn = doil.htkn->nxt;
+		free(doil.tkn);
+	}
+	src -= f_siz;
+	free(src);
+}
+
+/* generate doil code from dato code */
+doil_t
+front_end(void) {
+	ast_t *root = parse();
+	doil_t doil = doil_lex(root);
+	print_doil(doil);
+	doil_remove_unused_identifiers(&doil);
+	printf("------");
+	print_doil(doil);
+	return doil;
+}
+
+void
+linux_x86_64(doil_t doil) {
 	(void)doil;
 	assert(0 && "not implemented");
 }
 
 /* generate an executable from doil code */
 void
-back_end(string_t doil) {
+back_end(doil_t doil) {
 #if defined(__linux__) && defined(__x86_64__)
 	linux_x86_64(doil);
 #else
@@ -914,7 +1179,8 @@ back_end(string_t doil) {
 int
 main(int argc, char **argv) {
 	get_source(argc, argv);
-	string_t doil = front_end();
+	doil_t doil = front_end();
+	doil_clean_up(doil);
 	//back_end(doil);
 	return 0;
 }
