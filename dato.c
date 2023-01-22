@@ -581,6 +581,9 @@ typedef struct identifier {
 		unsigned int returntype;
 	};
 	unsigned int siz;
+	unsigned int use_amount;
+	unsigned int set_amount;
+	string_t first_value;
 	struct identifier *nxt;
 } identifier_t;
 
@@ -636,11 +639,11 @@ ids_resize(void) {
 identifier_t *
 get_identifier(unsigned int type, char *str, unsigned int siz) {
 	if (!siz) {
-		fprintf(stderr, "ERROR: trying to remove identifier, but string size is 0\n");
+		fprintf(stderr, "ERROR: trying to get identifier, but string size is 0\n");
 		exit(1);
 	}
 	if (!str) {
-		fprintf(stderr, "ERROR: trying to remove identifier, but string is NULL\n");
+		fprintf(stderr, "ERROR: trying to get identifier, but string is NULL\n");
 		exit(1);
 	}
 	unsigned int idx = hash(str, siz) % ids_cap;
@@ -670,6 +673,7 @@ add_identifier(unsigned int type, char *str, unsigned int siz) {
 		ids_count++;
 		if (ids_count / (float)ids_cap > 0.8f) ids_resize();
 		id = malloc(sizeof(identifier_t));
+		*id = (identifier_t){0};
 		id->type = type;
 		id->str = str;
 		id->siz = siz;
@@ -767,8 +771,8 @@ typedef struct instruction {
 	} type;
 	union {
 		struct {
-			unsigned int lhs;
-			unsigned int rhs;
+			reg_or_const lhs;
+			reg_or_const rhs;
 			unsigned int dst;
 		} ope; /*ope r0 r1 r2 = (r2 = r0 ? r1)*/
 		struct {
@@ -799,7 +803,17 @@ typedef struct instruction {
 
 	struct instruction *nxt;
 } instruction_t;
-
+const char *const instruction_type_str[] = {
+	"add",
+	"sub",
+	"mul",
+	"div",
+	"def",
+	"mov",
+	"set",
+	"get",
+	"ret",
+};
 const char *const doil_datatype_str[] = {
 	"byte",
 	"word",
@@ -808,11 +822,17 @@ const char *const doil_datatype_str[] = {
 };
 
 typedef struct {
-	int *registers;
+	int used;
+	string_t val;
+} reg_t;
+
+typedef struct {
+	reg_t *registers;
 	unsigned int registers_count;
 	unsigned int registers_cap;
 	instruction_t *ins;
 	instruction_t *hins;
+	unsigned int optimized;
 } doil_t;
 
 #define INTEGER_STRING_MAX 20
@@ -831,23 +851,23 @@ doil_make_instruction(doil_t *doil, unsigned int type) {
 unsigned int
 doil_get_register(doil_t *doil) {
 	for (unsigned int i = 0; i < doil->registers_count; i++) {
-		if (!doil->registers[i]) {
-			doil->registers[i] = 1;
+		if (!doil->registers[i].used) {
+			doil->registers[i].used = 1;
 			return i;
 		}
 	}
 	if (doil->registers_cap <= doil->registers_count) {
 		doil->registers_cap = !doil->registers_cap ? 10 : doil->registers_cap * 2;
 		doil->registers = !doil->registers ? malloc(sizeof(ast_t) * doil->registers_cap) : realloc(doil->registers, doil->registers_cap);
-		for (unsigned int i = doil->registers_count; i < doil->registers_cap; i++) doil->registers[i] = 0;
+		for (unsigned int i = doil->registers_count; i < doil->registers_cap; i++) doil->registers[i].used = 0;
 	}
-	doil->registers[doil->registers_count] = 1;
+	doil->registers[doil->registers_count].used = 1;
 	return doil->registers_count++;
 }
 
 void
 doil_clear_register(doil_t *doil, int register_index) {
-	doil->registers[register_index] = 0;
+	doil->registers[register_index].used = 0;
 }
 
 void
@@ -855,23 +875,28 @@ dato_variable_definition_to_doil(doil_t *doil, ast_t *def) {
 	token_t *type = def->hbranch->tkn,
 					*id 	= def->hbranch->nxt->tkn;
 	instruction_t *ins = doil_make_instruction(doil, DOIL_DEF);
+	identifier_t *var = add_identifier(ID_VARIABLE, id->str, id->siz);
 	ins->def.name = string(id->str, id->siz);
 	/*TODO: add a struct for types like the identifiers, for now they are all hard coded and unsigned*/
 	if (strncmp(type->str, "i1", max(type->siz, 2)) == 0 || strncmp(type->str, "u1", max(type->siz, 2)) == 0) {
 		ins->def.type = DOIL_BYTE;
+		var->datatype = DOIL_BYTE;
 	} else if (strncmp(type->str, "i2", max(type->siz, 2)) == 0 || strncmp(type->str, "u2", max(type->siz, 2)) == 0) {
 		ins->def.type = DOIL_WORD;
+		var->datatype = DOIL_WORD;
 	} else if (strncmp(type->str, "i4", max(type->siz, 2)) == 0 || strncmp(type->str, "u4", max(type->siz, 2)) == 0) {
 		ins->def.type = DOIL_DWORD;
+		var->datatype = DOIL_DWORD;
 	} else if (strncmp(type->str, "i8", max(type->siz, 2)) == 0 || strncmp(type->str, "u8", max(type->siz, 2)) == 0) {
 		ins->def.type = DOIL_QWORD;
+		var->datatype = DOIL_QWORD;
 	} else {
 		fprintf(stderr, "ERROR: type '%.*s' not supported\n", type->siz, type->str);
 		exit(1);
 	}
 }
 
-unsigned int dato_assignment_to_doil(doil_t *doil, ast_t *asg);
+unsigned int dato_assignment_to_doil(doil_t *doil, ast_t *asg, int return_register);
 unsigned int dato_expression_to_doil(doil_t *doil, ast_t *exp);
 
 unsigned int
@@ -879,14 +904,34 @@ dato_expression_operator_to_doil(doil_t *doil, ast_t *exp, unsigned int operator
 	ast_t *lhs = exp->hbranch;
 	ast_t *rhs = exp->hbranch->nxt;
 	
-	instruction_t *ins = doil_make_instruction(doil, operator);
+	unsigned int lhs_register, rhs_register;
 
-	ins->ope.lhs = dato_expression_to_doil(doil, lhs);
-	ins->ope.rhs = dato_expression_to_doil(doil, rhs);
-	ins->ope.dst = ins->ope.lhs;
-	
-	doil_clear_register(doil, ins->ope.rhs);
-	return ins->ope.lhs;
+	int lhs_is_reg = lhs->type != AST_INTEGER;
+	if (lhs_is_reg) lhs_register = dato_expression_to_doil(doil, lhs);
+
+	int rhs_is_reg = rhs->type != AST_INTEGER;
+	if (rhs_is_reg) rhs_register = dato_expression_to_doil(doil, rhs);
+
+	instruction_t *ins = doil_make_instruction(doil, operator);
+	ins->ope.lhs.is_reg = lhs_is_reg;
+	if (lhs_is_reg) {
+		ins->ope.lhs.val.reg = lhs_register;
+		ins->ope.dst = lhs_register;
+	} else {
+		ins->ope.lhs.val.cst = string(lhs->tkn->str, lhs->tkn->siz);
+		ins->ope.dst = doil_get_register(doil);
+		doil->registers[ins->ope.dst].val = ins->ope.lhs.val.cst;
+	}
+
+	ins->ope.rhs.is_reg = rhs_is_reg;
+	if (rhs_is_reg) {
+		ins->ope.rhs.val.reg = rhs_register;
+		doil_clear_register(doil, rhs_register);
+	} else {
+		ins->ope.rhs.val.cst = string(rhs->tkn->str, rhs->tkn->siz);
+	}
+
+	return ins->ope.dst;
 }
 
 unsigned int
@@ -894,6 +939,7 @@ dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 	unsigned int register_index;
 
 	instruction_t *ins;
+	identifier_t *var;
 
 	switch (exp->type) {
 		case AST_ADD:
@@ -909,19 +955,27 @@ dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 			register_index = dato_expression_operator_to_doil(doil, exp, DOIL_DIV);
 			break;
 		case AST_ASSIGN:
-			register_index = dato_assignment_to_doil(doil, exp);
+			register_index = dato_assignment_to_doil(doil, exp, 1);
 			break;
 		case AST_IDENTIFIER:
+			var = get_identifier(ID_VARIABLE, exp->tkn->str, exp->tkn->siz);
+			if (!var) {
+				fprintf(stderr, "ERROR: '%.*s' is not a variable\n", exp->tkn->siz, exp->tkn->str);
+				exit(1);
+			}
+			var->use_amount++;
 			ins = doil_make_instruction(doil, DOIL_GET);
 			ins->get.src = string(exp->tkn->str, exp->tkn->siz);
 			ins->get.reg = doil_get_register(doil);
 			register_index = ins->get.reg;
+			doil->registers[register_index].val = ins->get.src;
 			break;
 		case AST_INTEGER:
 			ins = doil_make_instruction(doil, DOIL_MOV);
 			ins->mov.reg = doil_get_register(doil);
 			ins->mov.val = string(exp->tkn->str, exp->tkn->siz);;
 			register_index = ins->mov.reg;
+			doil->registers[register_index].val = ins->mov.val;
 			break;
 		default:
 			fprintf(stderr, "ERROR: '%s' is not a valid expression\n", ast_type_str[exp->type]);
@@ -931,28 +985,41 @@ dato_expression_to_doil(doil_t *doil, ast_t *exp) {
 }
 
 unsigned int
-dato_assignment_to_doil(doil_t *doil, ast_t *asg) {
+dato_assignment_to_doil(doil_t *doil, ast_t *asg, int return_register) {
 	ast_t *id  = asg->hbranch;
 	ast_t *val = asg->hbranch->nxt;
 
-	instruction_t *ins = doil_make_instruction(doil, DOIL_SET);
+	identifier_t *var = NULL;
+	reg_or_const dst = {0}, src = {0};
 	if (id->type == AST_IDENTIFIER) {
-		ins->set.dst.val.cst = string(id->tkn->str, id->tkn->siz);
+		var = get_identifier(ID_VARIABLE, id->tkn->str, id->tkn->siz);
+		if (!var) {
+			fprintf(stderr, "ERROR: trying to assign to '%.*s', but '%.*s' isn't a variable\n", id->tkn->siz, id->tkn->str,id->tkn->siz, id->tkn->str);
+			exit(1);
+		}
+		var->set_amount++;
+		dst.val.cst = string(id->tkn->str, id->tkn->siz);
 	} else {
-		ins->set.dst.val.reg = dato_expression_to_doil(doil, id);
-		ins->set.dst.is_reg = 1;
-		doil_clear_register(doil, ins->set.dst.val.reg);
+		dst.val.reg = dato_expression_to_doil(doil, id);
+		dst.is_reg = 1;
+		doil_clear_register(doil, dst.val.reg);
 	}
 
-	unsigned int val_register = dato_expression_to_doil(doil, val);
 	if (val->type == AST_INTEGER) {
-		ins->set.src.val.cst = string(val->tkn->str, val->tkn->siz);
+		src.val.cst = string(val->tkn->str, val->tkn->siz);
+		if (var && var->set_amount == 1) {
+			var->first_value = src.val.cst;
+		}
 	} else {
-		ins->set.src.val.reg = val_register;
-		ins->set.src.is_reg = 1;
+		src.val.reg = dato_expression_to_doil(doil, val);
+		src.is_reg = 1;
+		if (!return_register) doil_clear_register(doil, src.val.reg);
 	}
+	instruction_t *ins = doil_make_instruction(doil, DOIL_SET);
+	ins->set.dst = dst;
+	ins->set.src = src;
 
-	return val_register;
+	return src.val.reg;
 }
 
 void
@@ -966,14 +1033,16 @@ dato_return_to_doil(doil_t *doil, ast_t *ret) {
 		return;
 	}
 
-	ins = doil_make_instruction(doil, DOIL_RET);;
+	reg_or_const src = {0};
 	if (val->type == AST_INTEGER) {
-		ins->ret.src.val.cst = string(val->tkn->str, val->tkn->siz);
+		src.val.cst = string(val->tkn->str, val->tkn->siz);
 	} else {
-		ins->ret.src.val.reg = dato_expression_to_doil(doil, val);
-		ins->ret.src.is_reg = 1;
-		doil_clear_register(doil, ins->ret.src.val.reg);
+		src.val.reg = dato_expression_to_doil(doil, val);
+		src.is_reg = 1;
+		doil_clear_register(doil, src.val.reg);
 	}
+	ins = doil_make_instruction(doil, DOIL_RET);;
+	ins->ret.src = src;
 }
 
 doil_t
@@ -994,7 +1063,7 @@ doil_lex(ast_t *root) {
 				dato_variable_definition_to_doil(&doil, root->branch);
 				break;
 			case AST_ASSIGN: 
-				doil_clear_register(&doil, dato_assignment_to_doil(&doil, root->branch));
+				dato_assignment_to_doil(&doil, root->branch, 0);
 				break;
 			case AST_RETURN: 
 				dato_return_to_doil(&doil, root->branch);
@@ -1005,15 +1074,8 @@ doil_lex(ast_t *root) {
 		}
 		root->branch = root->branch->nxt;
 	}
-	free(doil.registers);
 	free_ast(root);
 	return doil;
-}
-
-void
-doil_remove_unused_identifiers(doil_t *doil) {
-	(void)doil;
-	assert(0 && "not implemented");
 }
 
 void
@@ -1022,16 +1084,21 @@ print_doil(doil_t doil) {
 	while (doil.ins) {
 		switch (doil.ins->type) {
 			case DOIL_ADD:
-				printf("add r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
-				break;
 			case DOIL_SUB:
-				printf("sub r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
-				break;
 			case DOIL_MUL:
-				printf("mul r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
-				break;
 			case DOIL_DIV:
-				printf("div r%u %u %u\n", doil.ins->ope.lhs, doil.ins->ope.rhs, doil.ins->ope.dst);
+				printf("%s ", instruction_type_str[doil.ins->type]);
+				if (doil.ins->ope.lhs.is_reg) {
+					printf("r%u ", doil.ins->ope.lhs.val.reg);
+				} else {
+					printf("%.*s ", doil.ins->ope.lhs.val.cst.siz, doil.ins->ope.lhs.val.cst.buf);
+				}
+				if (doil.ins->ope.rhs.is_reg) {
+					printf("r%u ", doil.ins->ope.rhs.val.reg);
+				} else {
+					printf("%.*s ", doil.ins->ope.rhs.val.cst.siz, doil.ins->ope.rhs.val.cst.buf);
+				}
+				printf("r%u\n", doil.ins->ope.dst);
 				break;
 			case DOIL_DEF:
 				printf("def %.*s %s\n", doil.ins->def.name.siz, doil.ins->def.name.buf, doil_datatype_str[doil.ins->def.type]);
@@ -1067,11 +1134,174 @@ print_doil(doil_t doil) {
 				}
 				break;
 			default:
-				fprintf(stderr, "ERROR: not a valid instruction\n");
+				fprintf(stderr, "ERROR: not a valid instruction %d\n", doil.hins->type);
 				exit(1);
 		}
 		doil.ins = doil.ins->nxt;
 	}
+}
+
+#define doil_remove_instruction() do {\
+	if (prv) {\
+		prv->nxt = ins->nxt;\
+	} else {\
+		doil->hins = ins->nxt;\
+	}\
+	delete = 1;\
+} while(0)
+
+static char **bufs;
+static unsigned int bufs_cap;
+static unsigned int bufs_count;
+
+char *
+make_buffer(unsigned int buf_size) {
+	if (bufs_count >= bufs_cap) {
+		bufs_cap = bufs_cap ? bufs_cap * 2 :1;
+		bufs = bufs ? realloc(bufs, sizeof(char *) * bufs_cap) : malloc(sizeof(char *));
+	}
+	bufs[bufs_count] = malloc(buf_size);
+	memset(bufs[bufs_count], 0, buf_size);
+	return bufs[bufs_count++];
+}
+
+string_t
+doil_perform_operation(doil_t *doil, instruction_t *ins, unsigned int operator) {
+	unsigned int lhs = strtoul(ins->ope.lhs.val.cst.buf, NULL, 10);
+	unsigned int rhs = strtoul(ins->ope.rhs.val.cst.buf, NULL, 10);
+	unsigned int reg = ins->ope.dst;
+	string_t val;
+	ins->type = DOIL_MOV;
+	ins->mov.reg = reg;
+	char *buf = make_buffer(INTEGER_STRING_MAX);
+	switch (operator) {
+		case DOIL_ADD:
+			snprintf(buf, INTEGER_STRING_MAX, "%u", lhs + rhs);
+			val = string(buf, INTEGER_STRING_MAX);
+			break;
+		case DOIL_SUB:
+			snprintf(buf, INTEGER_STRING_MAX, "%u", lhs - rhs);
+			val = string(buf, INTEGER_STRING_MAX);
+			break;
+		case DOIL_MUL:
+			snprintf(buf, INTEGER_STRING_MAX, "%u", lhs * rhs);
+			val = string(buf, INTEGER_STRING_MAX);
+			break;
+		case DOIL_DIV:
+			if (!rhs) {
+				fprintf(stderr, "WARNING: trying to divide by zero\n");
+				exit(1);
+			}
+			snprintf(buf, INTEGER_STRING_MAX, "%u", lhs / rhs);
+			val = string(buf, INTEGER_STRING_MAX);
+			break;
+		default:
+			assert(0 && "unreachable");
+			break;
+	}
+	doil->registers[reg].val = val;
+	return val;
+}
+
+void
+doil_register_to_constant(doil_t *doil, reg_or_const *src) {
+	if (!src->is_reg) return;
+	string_t reg_val = string(doil->registers[src->val.reg].val.buf, doil->registers[src->val.reg].val.siz);
+	identifier_t *var = get_identifier(ID_VARIABLE, reg_val.buf, reg_val.siz);
+	if (var) return;
+	src->is_reg = 0;
+	src->val.cst = reg_val;
+	doil->optimized++;
+}
+
+int
+doil_optimize(doil_t *doil) {
+	doil->optimized = 0;
+	int delete = 0;
+	identifier_t *var;
+	instruction_t *ins;
+	instruction_t *prv = NULL;
+	doil->ins = doil->hins;
+	memset(doil->registers, 0, doil->registers_count * sizeof(reg_t));
+	string_t reg_val;
+	while (doil->ins) {
+		ins = doil->ins;
+		switch(ins->type) {
+			case DOIL_DEF:
+				var = get_identifier(ID_VARIABLE, ins->def.name.buf, ins->def.name.siz);
+				if (var->use_amount > 0) break;
+				doil_remove_instruction();
+				doil->optimized++;
+				break;
+			case DOIL_ADD:
+			case DOIL_SUB:
+			case DOIL_MUL:
+			case DOIL_DIV:
+				doil_register_to_constant(doil, &ins->ope.lhs);
+				doil_register_to_constant(doil, &ins->ope.rhs);
+				if (ins->ope.rhs.is_reg || ins->ope.lhs.is_reg) break;
+				ins->mov.val = doil_perform_operation(doil, ins, ins->type);
+				doil->optimized++;
+				break;
+			case DOIL_RET:
+				doil_register_to_constant(doil, &ins->ret.src);
+				break;
+			case DOIL_MOV:
+				doil->registers[ins->mov.reg].val = ins->mov.val;
+				var = get_identifier(ID_VARIABLE, ins->mov.val.buf, ins->mov.val.siz);
+				if (!var) {
+					doil_remove_instruction();
+					doil->optimized++;
+				}
+				break;
+			case DOIL_GET:
+				reg_val = doil->registers[ins->get.reg].val;
+				var = get_identifier(ID_VARIABLE, ins->get.src.buf, ins->get.src.siz);
+				if (reg_val.buf && strncmp(reg_val.buf, ins->get.src.buf, max(reg_val.siz, ins->get.src.siz)) == 0) {
+					var->use_amount--;
+					doil_remove_instruction();
+					doil->optimized++;
+				} else if (var->set_amount != 1) {
+					if (var->set_amount == 0)
+						fprintf(stderr, "WARNING: using variable '%.*s', but the variable isn't initalized\n", ins->get.src.siz, ins->get.src.buf);
+					doil->registers[ins->get.reg].val = ins->get.src;
+				} else {
+					ins->type = DOIL_MOV;
+					ins->mov.reg = ins->get.reg;
+					var->use_amount--;
+					ins->mov.val = var->first_value;
+					doil->registers[ins->mov.reg].val = ins->mov.val;
+					doil->optimized++;
+				}
+				break;
+			case DOIL_SET:
+				if (!ins->set.dst.is_reg) {
+					var = get_identifier(ID_VARIABLE, ins->set.dst.val.cst.buf, ins->set.dst.val.cst.siz);
+					if (!var || var->use_amount > 0) {
+						if (ins->set.src.is_reg) doil->registers[ins->set.src.val.reg].val = ins->set.dst.val.cst;
+						break;
+					}
+					doil_remove_instruction();
+					doil->optimized++;
+				} else {
+					if (!ins->set.src.is_reg) 
+						doil->registers[ins->set.dst.val.reg].val = ins->set.src.val.cst;
+					else 
+						doil->registers[ins->set.dst.val.reg].val = doil->registers[ins->set.src.val.reg].val;
+				}
+				break;
+			default:
+				break;
+		}
+		doil->ins = doil->ins->nxt;
+		if (delete) {
+			delete = 0;
+			free(ins);
+		} else {
+			prv = ins;
+		}
+	}
+	return doil->optimized > 0;
 }
 
 void
@@ -1081,6 +1311,18 @@ doil_clean_up(doil_t doil) {
 		doil.hins = doil.hins->nxt;
 		free(doil.ins);
 	}
+	free(doil.registers);
+	identifier_t *id;
+	for (unsigned int i = 0; i < ids_cap; i++) {
+		while (ids[i]) {
+			id = ids[i];
+			ids[i] = ids[i]->nxt;
+			free(id);
+		}
+	}
+	free(ids);
+	for (unsigned int i = 0; i < bufs_count; i++) free(bufs[i]);
+	free(bufs);
 	src -= f_siz;
 	free(src);
 }
@@ -1090,9 +1332,7 @@ doil_t
 front_end(void) {
 	ast_t *root = parse();
 	doil_t doil = doil_lex(root);
-	print_doil(doil);
-	doil_remove_unused_identifiers(&doil);
-	printf("------");
+	while (doil_optimize(&doil));
 	print_doil(doil);
 	return doil;
 }
